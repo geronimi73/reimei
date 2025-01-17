@@ -1,0 +1,12 @@
+datasets
+diffusers
+transformers
+timm
+open-clip-torch
+pyarrow
+accelerate
+einops
+huggingface_hub[cli]
+hf_transfer
+tensorboard
+matplotlib
