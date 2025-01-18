@@ -25,44 +25,6 @@ def apply_mask_to_tensor(x, mask):
 
     return x
 
-def unpatchify(x, patch_size, height, width):
-    """
-    Reconstructs images from patches.
-
-    Args:
-        x (torch.Tensor): Tensor of shape (bs, num_tokens, patch_size * patch_size * in_channels)
-        patch_size (int): Size of each patch.
-        height (int): Original image height.
-        width (int): Original image width.
-
-    Returns:
-        torch.Tensor: Reconstructed image of shape (bs, in_channels, height, width)
-    """
-    bs, num_tokens, patch_dim = x.shape
-    H, W = patch_size
-    in_channels = patch_dim // (H * W)
-
-    # Calculate the number of patches along each dimension
-    num_tokens_h = height // H
-    num_tokens_w = width // W
-
-    # Ensure num_tokens equals num_tokens_h * num_tokens_w
-    assert num_tokens == num_tokens_h * num_tokens_w, "Mismatch in number of patches."
-
-    # Reshape x to (bs, num_tokens_h, num_tokens_w, H, W, in_channels)
-    x = x.view(bs, num_tokens_h, num_tokens_w, H, W, in_channels)
-
-    # Permute x to (bs, num_tokens_h, H, num_tokens_w, W, in_channels)
-    x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
-
-    # Reshape x to (bs, height, width, in_channels)
-    reconstructed = x.view(bs, height, width, in_channels)
-
-    # Permute back to (bs, in_channels, height, width)
-    reconstructed = reconstructed.permute(0, 3, 1, 2).contiguous()
-
-    return reconstructed
-
 def random_mask(bs: int, height: int, width: int, mask_ratio: float) -> torch.Tensor:
     """
     Generates a random mask for image tokens. Randomly selects tokens to mask.
