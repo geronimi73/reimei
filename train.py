@@ -23,7 +23,7 @@ DTYPE = torch.bfloat16
 def sample_images(model, vae, noise, embeddings):
     with torch.no_grad():
         # Use the stored embeddings
-        sampled_latents = sample(model, noise, embeddings, sample_steps=50)
+        sampled_latents = sample(model, noise, embeddings.unsqueeze(1), embeddings, sample_steps=50)
         
         # Decode latents to images
         sampled_images = vae.decode(sampled_latents).sample
@@ -53,7 +53,7 @@ class MemmapDataset(Dataset):
         return sample
 
 @torch.no_grad()
-def sample(model, z, cond, null_cond=None, sample_steps=2, cfg=2.0):
+def sample(model, z, cond, vec, null_cond=None, sample_steps=2, cfg=2.0):
     b = z.size(0)
     dt = 1.0 / sample_steps
     dt = torch.tensor([dt] * b).to(z.device, DTYPE).view([b, *([1] * len(z.shape[1:]))])
@@ -63,7 +63,7 @@ def sample(model, z, cond, null_cond=None, sample_steps=2, cfg=2.0):
         t = i / sample_steps
         t = torch.tensor([t] * b).to(z.device, DTYPE)
 
-        vc = model(z, t, cond, None).to(DTYPE)
+        vc = model(z, t, cond, vec, None).to(DTYPE)
         # if null_cond is not None:
         #     vu = model(z, t, null_cond)
         #     vc = vu + cfg * (vc - vu)
@@ -95,24 +95,24 @@ if __name__ == "__main__":
     input_dim = VAE_CHANNELS
     embed_dim = 1024
     num_layers = 4
-    num_heads = 32
-    mlp_dim = 2304
+    num_heads = 16
+    mlp_dim = 2048
     cond_embed_dim = 1 # Null for this dataset
     # pos_embed_dim = 60
     pos_embed_dim = None
     num_experts = 1
     active_experts = 1
     shared_experts = None
-    patch_mixer_layers = 1
+    token_mixer_layers = 2
     dropout = 0.1
 
     accelerator = Accelerator()
     device = accelerator.device
 
     model = MicroDiT(input_dim, embed_dim, num_layers, 
-                    num_heads, mlp_dim, cond_embed_dim,
+                    num_heads, mlp_dim, cond_embed_dim, cond_embed_dim,
                     num_experts, active_experts, shared_experts,
-                    dropout, patch_mixer_layers
+                    dropout, token_mixer_layers
     ).to(DTYPE)
 
     print("Number of parameters: ", sum(p.numel() for p in model.parameters()))
@@ -120,8 +120,8 @@ if __name__ == "__main__":
     print("Starting training...")
     
     # dataset = get_dataset(BS, SEED + accelerator.process_index, num_workers=64)
-    dataset = load_dataset(f"{USERNAME}/{DATASET_NAME}", split="train", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}")
-    # dataset = MemmapDataset(f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth")
+    # dataset = load_dataset(f"{USERNAME}/{DATASET_NAME}", split="train", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}")
+    dataset = MemmapDataset(f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth")
     dataset = DataLoader(dataset, batch_size=BS, shuffle=True, num_workers=0)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
@@ -136,17 +136,17 @@ if __name__ == "__main__":
     # del checkpoint
     
     if accelerator.is_main_process:
-        dc_ae = AutoencoderDC.from_pretrained("mit-han-lab/dc-ae-f64c128-mix-1.0-diffusers", torch_dtype=DTYPE, cache_dir=f"{MODELS_DIR_BASE}/dc_ae", revision="main").to(device).eval()
+        dc_ae = AutoencoderDC.from_pretrained("mit-han-lab/dc-ae-f32c32-in-1.0-diffusers", torch_dtype=DTYPE, cache_dir=f"{MODELS_DIR_BASE}/dc_ae", revision="main").to(device).eval()
         assert dc_ae.config.scaling_factor == VAE_SCALING_FACTOR, f"Scaling factor mismatch: {dc_ae.config.scaling_factor} != {VAE_SCALING_FACTOR}"
         
         os.makedirs("logs", exist_ok=True)
 
-        noise = torch.randn(9, VAE_CHANNELS, 16, 16).to(device, dtype=DTYPE)
+        noise = torch.randn(9, VAE_CHANNELS, 8, 8).to(device, dtype=DTYPE)
         example_batch = next(iter(dataset))
         # example_embeddings = example_batch["text_embedding"][:9].to(device)
         # example_captions = example_batch["caption"][:9]
-        example_latents = batch_to_tensors(example_batch)[:9].to(device, dtype=DTYPE)
-        # example_latents = example_batch.to(device, dtype=DTYPE)[:9]
+        # example_latents = batch_to_tensors(example_batch)[:9].to(device, dtype=DTYPE)
+        example_latents = example_batch.to(device, dtype=DTYPE)[:9]
         with torch.no_grad():
             example_ground_truth = dc_ae.decode(example_latents).sample
         grid = torchvision.utils.make_grid(example_ground_truth, nrow=3, normalize=True, scale_each=True)
@@ -172,8 +172,8 @@ if __name__ == "__main__":
     for epoch in range(EPOCHS):
         progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch}", leave=False)
         for batch_idx, batch in enumerate(progress_bar):
-            latents = batch_to_tensors(batch).to(device, DTYPE)
-            # latents = batch.to(device, dtype=DTYPE)
+            # latents = batch_to_tensors(batch).to(device, DTYPE)
+            latents = batch.to(device, dtype=DTYPE)
 
             # caption_embeddings = batch["text_embedding"].to(device)
             bs, c, h, w = latents.shape
@@ -192,7 +192,7 @@ if __name__ == "__main__":
             z1 = torch.randn_like(latents, device=device, dtype=DTYPE)
             zt = (1 - texp) * latents + texp * z1
 
-            vtheta = model(zt, t, caption_embeddings, mask)
+            vtheta = model(zt, t, caption_embeddings.unsqueeze(1), caption_embeddings, mask)
             sample_theta = z1 - vtheta
 
             latents = apply_mask_to_tensor(latents, mask)

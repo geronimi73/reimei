@@ -57,17 +57,71 @@ def rope_2d(dim: int, height: int, width: int, base: float = 10000.0) -> torch.T
     emb_2d = emb_2d.view(height*width, dim)               # flatten to [N, dim]
     return emb_2d
 
+def sincos_2d(embed_dim, h, w):
+    """
+    :param embed_dim: dimension of the embedding
+    :param h: height of the grid
+    :param w: width of the grid
+    :return: [h*w, embed_dim] or [1+h*w, embed_dim] (w/ or w/o cls_token)
+    """
+    grid_h = torch.arange(h, dtype=torch.float32)
+    grid_w = torch.arange(w, dtype=torch.float32)
+    grid = torch.meshgrid(grid_h, grid_w, indexing='ij')
+    grid = torch.stack(grid, dim=0)
+
+    grid = grid.reshape([2, 1, h, w])
+    pos_embed = sincos_2d_from_grid(embed_dim, grid)
+    return pos_embed
+
+def sincos_2d_from_grid(embed_dim, grid):
+    assert embed_dim % 2 == 0
+
+    # use half of dimensions to encode grid_h
+    emb_h = sincos_1d(embed_dim // 2, grid[0])  # (H*W, D/2)
+    emb_w = sincos_1d(embed_dim // 2, grid[1])  # (H*W, D/2)
+
+    emb = torch.cat([emb_h, emb_w], dim=1) # (H*W, D)
+    return emb
+
+def sincos_1d(embed_dim, pos):
+    """
+    embed_dim: output dimension for each position
+    pos: a list of positions to be encoded: size (M,)
+    out: (M, D)
+    """
+    assert embed_dim % 2 == 0
+    omega = torch.arange(embed_dim // 2, dtype=torch.float32)
+    omega /= embed_dim / 2.
+    omega = 1. / 10000**omega  # (D/2,)
+
+    pos = pos.reshape(-1)  # (M,)
+    out = torch.einsum('m,d->md', pos, omega)  # (M, D/2), outer product
+
+    emb_sin = torch.sin(out) # (M, D/2)
+    emb_cos = torch.cos(out) # (M, D/2)
+
+    emb = torch.cat([emb_sin, emb_cos], dim=1)  # (M, D)
+    return emb
+
+class MLPEmbedder(nn.Module):
+    def __init__(self, in_dim: int, hidden_dim: int):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim, bias=True),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim, bias=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.mlp(x)
+
 class TimestepEmbedder(nn.Module):
     """
     Embeds scalar timesteps into vector representations.
     """
     def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(frequency_embedding_size, hidden_size, bias=True),
-            nn.SiLU(),
-            nn.Linear(hidden_size, hidden_size, bias=True),
-        )
+        self.mlp = MLPEmbedder(frequency_embedding_size, hidden_size)
         self.frequency_embedding_size = frequency_embedding_size
 
     @staticmethod
