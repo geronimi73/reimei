@@ -1,8 +1,7 @@
 import torch.nn as nn
-from .embed import sincos_2d, TimestepEmbedder, MLPEmbedder
+from .embed import sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
 from .utils import remove_masked_tokens, add_masked_tokens
 from .backbone import TransformerBackbone
-
 from .token_mixer import TokenMixer
 import torch
 from config import VAE_SCALING_FACTOR
@@ -62,8 +61,7 @@ class MicroDiT(nn.Module):
         self.backbone = TransformerBackbone(self.embed_dim, self.embed_dim, self.embed_dim, num_layers, num_heads, mlp_dim, 
                                         num_experts, active_experts, shared_experts, dropout)
         
-        # Output layer
-        self.output = MLPEmbedder(self.embed_dim, self.channels)
+        self.output_layer = OutputLayer(self.embed_dim, self.channels)
 
         self.initialize_weights()
 
@@ -76,6 +74,11 @@ class MicroDiT(nn.Module):
                 nn.init.constant_(module.mlp[0].bias, 0)
                 nn.init.xavier_uniform_(module.mlp[2].weight)
                 nn.init.constant_(module.mlp[2].bias, 0)
+            elif isinstance(module, nn.LayerNorm):
+                if module.weight is not None:
+                    nn.init.constant_(module.weight, 1.0)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
 
         # Apply basic initialization to all modules
         self.apply(_basic_init)
@@ -87,8 +90,8 @@ class MicroDiT(nn.Module):
         nn.init.constant_(self.time_embedder.mlp.mlp[2].bias, 0)
 
         # Zero-out the last linear layer in the output to ensure initial predictions are zero
-        nn.init.constant_(self.output.mlp[-1].weight, 0)
-        nn.init.constant_(self.output.mlp[-1].bias, 0)
+        nn.init.constant_(self.output_layer.mlp.mlp[-1].weight, 0)
+        nn.init.constant_(self.output_layer.mlp.mlp[-1].bias, 0)
 
         self.backbone.initialize_weights()
         self.token_mixer.initialize_weights()
@@ -133,7 +136,7 @@ class MicroDiT(nn.Module):
         
         # Final output layer
         # (bs, unmasked_num_tokens, embed_dim) -> (bs, unmasked_num_tokens, in_channels)
-        img = self.output(img)
+        img = self.output_layer(img, vec)
 
         # Add masked patches
         if mask is not None:

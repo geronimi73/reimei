@@ -1,7 +1,7 @@
 
 import torch
 import torch.nn as nn
-from transformer.moedit import DiTBlock
+from transformer.moedit import DoubleStreamBlock
 
 class TokenMixer(nn.Module):
     """
@@ -11,7 +11,7 @@ class TokenMixer(nn.Module):
         - vec:       [B, embed_dim]            (conditioning vector for Modulation)
         - h          Height of the original image
         - w          Width of the original image
-    and returns the updated (img, txt) after `num_layers` of DiTBlock.
+    and returns the updated (img, txt) after `num_layers` of DoubleStreamBlock.
     """
     def __init__(
         self,
@@ -26,7 +26,7 @@ class TokenMixer(nn.Module):
     ):
         super().__init__()
         self.layers = nn.ModuleList([
-            DiTBlock(
+            DoubleStreamBlock(
                 hidden_size=embed_dim,
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,

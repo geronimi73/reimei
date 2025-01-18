@@ -265,94 +265,14 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, dropout=0.0) ->
     return x
 
 #################################################################################
-#                                 Core DiT Model                                #
+#                                 Core DiT Modules                              #
 #################################################################################
 
-def modulate(x, shift, scale):
-    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
-
-class DiTBlock(nn.Module):
+class DoubleStreamBlock(nn.Module):
     """
     A DiT block with MoE for text & image, plus separate 1D & 2D RoPE application
-    and joint attention. Similar to DoubleStreamBlock, but with MoE instead of MLP.
+    and joint attention. Similar to flux implementation, but with MoE instead of MLP.
     """
-    def rotary_multiply_1d(
-        self,
-        q: torch.Tensor, 
-        k: torch.Tensor, 
-        rope_1d: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Applies standard 1D rotary embedding to (q,k).
-        - q, k: shape [B, H, L, D]
-        - rope_1d: shape [B, L, D], i.e. cos/sin interleaved
-        Returns:
-            (q_rotated, k_rotated) of the same shape.
-        """
-        B, H, L, D = q.shape
-
-        # Reshape rope to [B, L, D/2, 2] => split into cos and sin
-        rope_2 = rope_1d.view(B, L, D // 2, 2).float()
-
-        q_2 = q.view(B, H, L, D // 2, 2).float()
-        k_2 = k.view(B, H, L, D // 2, 2).float()
-
-        cos_ = rope_2[..., 0].unsqueeze(1)  # => [B, 1, L, D//2]
-        sin_ = rope_2[..., 1].unsqueeze(1)
-
-        # standard rotation: (x, y) -> (x cos - y sin, x sin + y cos)
-        x_q, y_q = q_2[..., 0], q_2[..., 1]
-        x_k, y_k = k_2[..., 0], k_2[..., 1]
-
-        q_rot = torch.stack([
-            x_q * cos_ - y_q * sin_,
-            x_q * sin_ + y_q * cos_
-        ], dim=-1)
-        k_rot = torch.stack([
-            x_k * cos_ - y_k * sin_,
-            x_k * sin_ + y_k * cos_
-        ], dim=-1)
-
-        # reshape back
-        q_out = q_rot.view(B, H, L, D).type_as(q)
-        k_out = k_rot.view(B, H, L, D).type_as(k)
-        return q_out, k_out
-
-
-    def rotary_multiply_2d(
-        self,
-        q: torch.Tensor, 
-        k: torch.Tensor, 
-        rope_2d: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Applies 2D rotary embedding by splitting row vs. col halves.
-        - q, k: shape [B, H, L, D]
-        - rope_2d: shape [B, L, D], where the first half is row-emb, second half is col-emb
-        Returns:
-            (q_rotated, k_rotated) of the same shape.
-        """
-        B, H, L, D_total = q.shape
-        half_dim = D_total // 2
-
-        # The first half of rope_2d => row part
-        # The second half => col part
-        row_part = rope_2d[:, :, :half_dim]
-        col_part = rope_2d[:, :, half_dim:]
-
-        # Split q, k along their last dimension into row vs. col portions
-        q_row, q_col = q.split(half_dim, dim=-1)
-        k_row, k_col = k.split(half_dim, dim=-1)
-
-        # Now rotate row half with row_part, col half with col_part
-        q_row_out, k_row_out = self.rotary_multiply_1d(q_row, k_row, row_part)
-        q_col_out, k_col_out = self.rotary_multiply_1d(q_col, k_col, col_part)
-
-        # Concatenate the row-rotated and col-rotated
-        q_out = torch.cat([q_row_out, q_col_out], dim=-1)
-        k_out = torch.cat([k_row_out, k_col_out], dim=-1)
-        return q_out, k_out
-
     def __init__(
         self,
         hidden_size: int,
@@ -457,7 +377,7 @@ class DiTBlock(nn.Module):
         # QK-norm
         img_q, img_k = self.img_qk_norm(img_q, img_k, img_v)
         # apply 2D rope => shape [B, L_img, hidden_size]
-        img_q, img_k = self.rotary_multiply_2d(img_q, img_k, img_rope)
+        img_q, img_k = rotary_multiply_2d(img_q, img_k, img_rope)
 
         # 3) modulate text
         txt_mod1, txt_mod2 = self.txt_mod(vec)  
@@ -469,7 +389,7 @@ class DiTBlock(nn.Module):
         txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (three H D) -> three B H L D", three=3, H=self.num_heads)
         txt_q, txt_k = self.txt_qk_norm(txt_q, txt_k, txt_v)
         # apply 1D rope
-        txt_q, txt_k = self.rotary_multiply_1d(txt_q, txt_k, txt_rope)
+        txt_q, txt_k = rotary_multiply_1d(txt_q, txt_k, txt_rope)
 
         # 5) joint attention
         # Cat along the L dimension
@@ -498,3 +418,225 @@ class DiTBlock(nn.Module):
         )
 
         return img_out, txt_out
+    
+class SingleStreamBlock(nn.Module):
+    """
+    A DiT "single-stream" block with:
+      - separate text/image QKV + RoPE
+      - a single cross-attention pass over concatenated sequences
+      - Sparse MoE in place of the original MLP
+    """
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        num_experts: int = 8,
+        num_experts_per_tok: int = 2,
+        pretraining_tp: int = 2,
+        num_shared_experts: int = 2,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.head_dim = hidden_size // num_heads
+        self.dropout = dropout
+
+        # Modulation with "double=True" so we get two sets (mod1, mod2)
+        #   - typically one set is used for the attn skip-connection
+        #   - the second set is used for the MoE skip-connection
+        self.modulation = Modulation(hidden_size, double=True)
+
+        # First norm + linear for text
+        self.norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.qkv = nn.Linear(hidden_size, hidden_size * 3, bias=True)
+        self.qk_norm = QKNorm(self.head_dim)
+
+        # Output projection after attention
+        self.proj = nn.Linear(hidden_size, hidden_size)
+
+        # Second norm and sparse MoE, replacing what was originally an MLP
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.moe = SparseMoeBlock(
+            hidden_size,
+            mlp_ratio,
+            num_experts,
+            num_experts_per_tok,
+            pretraining_tp,
+            num_shared_experts,
+        )
+
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        """
+        Simple init scheme similar to your DoubleStreamBlock.
+        """
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.LayerNorm):
+                if module.weight is not None:
+                    nn.init.constant_(module.weight, 1.0)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+
+        self.apply(_basic_init)
+        self.moe.initialize_weights()
+
+    def forward(
+        self,
+        img: torch.Tensor,   # [B, L_img, hidden_size]
+        txt: torch.Tensor,   # [B, L_txt, hidden_size]
+        vec: torch.Tensor,   # conditioning vector => for Modulation
+        mask: torch.Tensor,  # optional mask for images (or None)
+        h: int,              # image height (2D RoPE)
+        w: int,              # image width  (2D RoPE)
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        B, L_txt, _ = txt.shape
+        _, L_img, _ = img.shape
+
+        # 1) Prepare text RoPE (1D)
+        rope_txt = rope_1d(self.head_dim, L_txt)  # [L_txt, d]
+        rope_txt = rope_txt.unsqueeze(0).repeat(B, 1, 1).to(txt.device)
+
+        # 2) Prepare image RoPE (2D)
+        rope_img = rope_2d(self.head_dim, h, w)   # [L_img, d], flattened from (h*w)
+        rope_img = rope_img.unsqueeze(0).repeat(B, 1, 1).to(img.device)
+        if mask is not None:
+            rope_img = remove_masked_tokens(rope_img, mask)
+
+        # 3) modulation parameters => "double=True" => mod1, mod2
+        mod1, mod2 = self.modulation(vec)
+
+        # ---- TEXT branch ----
+        txt_in = self.norm(txt)
+        txt_in = (1 + mod1.scale) * txt_in + mod1.shift
+        txt_qkv = self.qkv(txt_in)  # [B, L_txt, 3*hidden_size]
+        txt_q, txt_k, txt_v = rearrange(
+            txt_qkv, "B L (three H D) -> three B H L D", three=3, H=self.num_heads
+        )
+        txt_q, txt_k = self.qk_norm(txt_q, txt_k, txt_v)
+        # Apply 1D RoPE
+        txt_q, txt_k = rotary_multiply_1d(txt_q, txt_k, rope_txt)
+
+        # ---- IMAGE branch ----
+        img_in = self.norm(img)
+        img_in = (1 + mod1.scale) * img_in + mod1.shift
+        img_qkv = self.qkv(img_in)
+        img_q, img_k, img_v = rearrange(
+            img_qkv, "B L (three H D) -> three B H L D", three=3, H=self.num_heads
+        )
+        img_q, img_k = self.qk_norm(img_q, img_k, img_v)
+        # Apply 2D RoPE
+        img_q, img_k = rotary_multiply_2d(img_q, img_k, rope_img)
+
+        # ---- Single-stream attention: concat txt + img ----
+        q = torch.cat([txt_q, img_q], dim=2)  # [B, H, (L_txt+L_img), D]
+        k = torch.cat([txt_k, img_k], dim=2)
+        v = torch.cat([txt_v, img_v], dim=2)
+
+        # Standard scaled dot-product attention across entire sequence
+        attn_out = attention(q, k, v, dropout=self.dropout)
+        # Split out txt/img
+        txt_attn = attn_out[:, :L_txt]  # [B, L_txt, D]
+        img_attn = attn_out[:, L_txt:]  # [B, L_img, D]
+
+        # ---- Add first skip-connection + projection ----
+        txt_out = txt + mod1.gate * self.proj(txt_attn)
+        img_out = img + mod1.gate * self.proj(img_attn)
+
+        # ---- Single MoE over entire sequence ----
+        #   (We re-concat txt + img, run LN+shift+scale, pass to MoE, then split)
+        x_out = torch.cat([txt_out, img_out], dim=1)  # [B, L_txt+L_img, hidden_size]
+        x_in = self.norm2(x_out)
+        x_in = (1 + mod2.scale) * x_in + mod2.shift
+
+        x_moe = self.moe(x_in)
+        x_out = x_out + mod2.gate * x_moe
+
+        # final separation
+        txt_out = x_out[:, :L_txt]
+        img_out = x_out[:, L_txt:]
+
+        return img_out, txt_out
+
+## Rope helper functions
+
+def rotary_multiply_1d(
+    q: torch.Tensor, 
+    k: torch.Tensor, 
+    rope_1d: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Applies standard 1D rotary embedding to (q,k).
+    - q, k: shape [B, H, L, D]
+    - rope_1d: shape [B, L, D], i.e. cos/sin interleaved
+    Returns:
+        (q_rotated, k_rotated) of the same shape.
+    """
+    B, H, L, D = q.shape
+
+    # Reshape rope to [B, L, D/2, 2] => split into cos and sin
+    rope_2 = rope_1d.view(B, L, D // 2, 2).float()
+
+    q_2 = q.view(B, H, L, D // 2, 2).float()
+    k_2 = k.view(B, H, L, D // 2, 2).float()
+
+    cos_ = rope_2[..., 0].unsqueeze(1)  # => [B, 1, L, D//2]
+    sin_ = rope_2[..., 1].unsqueeze(1)
+
+    # standard rotation: (x, y) -> (x cos - y sin, x sin + y cos)
+    x_q, y_q = q_2[..., 0], q_2[..., 1]
+    x_k, y_k = k_2[..., 0], k_2[..., 1]
+
+    q_rot = torch.stack([
+        x_q * cos_ - y_q * sin_,
+        x_q * sin_ + y_q * cos_
+    ], dim=-1)
+    k_rot = torch.stack([
+        x_k * cos_ - y_k * sin_,
+        x_k * sin_ + y_k * cos_
+    ], dim=-1)
+
+    # reshape back
+    q_out = q_rot.view(B, H, L, D).type_as(q)
+    k_out = k_rot.view(B, H, L, D).type_as(k)
+    return q_out, k_out
+
+
+def rotary_multiply_2d(
+    q: torch.Tensor, 
+    k: torch.Tensor, 
+    rope_2d: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Applies 2D rotary embedding by splitting row vs. col halves.
+    - q, k: shape [B, H, L, D]
+    - rope_2d: shape [B, L, D], where the first half is row-emb, second half is col-emb
+    Returns:
+        (q_rotated, k_rotated) of the same shape.
+    """
+    B, H, L, D_total = q.shape
+    half_dim = D_total // 2
+
+    # The first half of rope_2d => row part
+    # The second half => col part
+    row_part = rope_2d[:, :, :half_dim]
+    col_part = rope_2d[:, :, half_dim:]
+
+    # Split q, k along their last dimension into row vs. col portions
+    q_row, q_col = q.split(half_dim, dim=-1)
+    k_row, k_col = k.split(half_dim, dim=-1)
+
+    # Now rotate row half with row_part, col half with col_part
+    q_row_out, k_row_out = rotary_multiply_1d(q_row, k_row, row_part)
+    q_col_out, k_col_out = rotary_multiply_1d(q_col, k_col, col_part)
+
+    # Concatenate the row-rotated and col-rotated
+    q_out = torch.cat([q_row_out, q_col_out], dim=-1)
+    k_out = torch.cat([k_row_out, k_col_out], dim=-1)
+    return q_out, k_out

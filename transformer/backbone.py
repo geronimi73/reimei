@@ -1,4 +1,4 @@
-from transformer.moedit import DiTBlock
+from transformer.moedit import DoubleStreamBlock, SingleStreamBlock
 from torch import nn
 
 def nearest_divisor(scaled_num_heads, embed_dim):
@@ -33,13 +33,21 @@ class TransformerBackbone(nn.Module):
             scaled_num_heads = nearest_divisor(scaled_num_heads, embed_dim)
             mlp_ratio = int(scaled_mlp_dim / embed_dim)
 
-            # Choose layer type based on the layer index (even/odd)
-            if i % 2 == 0:  # Even layers use regular DiT
-                self.layers.append(DiTBlock(embed_dim, scaled_num_heads, mlp_ratio, 
-                                            1, 1, pretraining_tp=pretraining_tp, num_shared_experts=shared_experts, dropout=dropout))
+            if i % 2 == 0:  # Even layers use regular DiT (no MoE)
+                n_exp = 1
+                n_shared = 1
+                n_act = 1
             else:  # Odd layers use MoE DiT
-                self.layers.append(DiTBlock(embed_dim, scaled_num_heads, mlp_ratio, 
-                                               num_experts, active_experts, pretraining_tp=pretraining_tp, num_shared_experts=shared_experts, dropout=dropout))
+                n_exp = num_experts
+                n_shared = shared_experts
+                n_act = active_experts
+
+            if i < num_layers // 2: # First half uses DoubleStreamBlock
+                self.layers.append(DoubleStreamBlock(embed_dim, scaled_num_heads, mlp_ratio, 
+                                            n_exp, n_act, pretraining_tp=pretraining_tp, num_shared_experts=n_shared, dropout=dropout))
+            else:  # Second half uses SingleStreamBlock
+                self.layers.append(SingleStreamBlock(embed_dim, scaled_num_heads, mlp_ratio, 
+                                               n_exp, n_act, pretraining_tp=pretraining_tp, num_shared_experts=n_shared, dropout=dropout))
 
         self.output_layer = nn.Linear(embed_dim, input_dim)
 
@@ -57,8 +65,7 @@ class TransformerBackbone(nn.Module):
 
         # Initialize DiTBlocks if any
         for layer in self.layers:
-            if isinstance(layer, DiTBlock):
-                layer.initialize_weights()
+            layer.initialize_weights()
 
     def forward(self, x, text, vec, mask, original_h, original_w):
         x = self.image_embedding(x)
