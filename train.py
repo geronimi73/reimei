@@ -96,13 +96,13 @@ if __name__ == "__main__":
     embed_dim = 1024
     num_layers = 4
     num_heads = 16
-    mlp_dim = 2048
+    mlp_dim = 2048 / 4
     cond_embed_dim = 1 # Null for this dataset
     # pos_embed_dim = 60
     pos_embed_dim = None
-    num_experts = 1
-    active_experts = 1
-    shared_experts = None
+    num_experts = 8
+    active_experts = 2
+    shared_experts = 2
     token_mixer_layers = 2
     dropout = 0.1
 
@@ -213,6 +213,7 @@ if __name__ == "__main__":
                 losses.append(loss.item())
 
                 if batch_idx % 200 == 0:
+                    model.eval()
                     dc_ae = dc_ae.to(device)
 
                     grid = sample_images(model, dc_ae, noise, torch.zeros((9, cond_embed_dim), device=device, dtype=DTYPE))
@@ -221,6 +222,8 @@ if __name__ == "__main__":
                     del grid
 
                     dc_ae = dc_ae.to("cpu")
+
+                    model.train()
 
         print(f"Epoch {epoch} complete.")
         accelerator.wait_for_everyone()

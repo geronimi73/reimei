@@ -148,20 +148,22 @@ class MicroDiT(nn.Module):
         return img
     
     @torch.no_grad()
-    def sample(self, z, cond, sample_steps=50, cfg=2.0):
+    def sample(model, z, cond, vec, null_cond=None, sample_steps=2, cfg=2.0):
         b = z.size(0)
         dt = 1.0 / sample_steps
-        dt = torch.tensor([dt] * b).to(z.device).view([b, *([1] * len(z.shape[1:]))])
+        dt = torch.tensor([dt] * b).to(z.device, torch.bfloat16).view([b, *([1] * len(z.shape[1:]))])
         images = [z]
+
         for i in range(sample_steps, 0, -1):
             t = i / sample_steps
-            t = torch.tensor([t] * b).to(z.device).to(torch.float16)
+            t = torch.tensor([t] * b).to(z.device, torch.bfloat16)
 
-            vc = self(z, t, cond, None)
-            null_cond = torch.zeros_like(cond)
-            vu = self(z, t, null_cond)
-            vc = vu + cfg * (vc - vu)
+            vc = model(z, t, cond, vec, None).to(torch.bfloat16)
+            # if null_cond is not None:
+            #     vu = model(z, t, null_cond)
+            #     vc = vu + cfg * (vc - vu)
 
             z = z - dt * vc
             images.append(z)
+
         return (images[-1] / VAE_SCALING_FACTOR)

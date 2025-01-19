@@ -106,7 +106,7 @@ class MoeMLP(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = nn.SiLU()
+        self.act_fn = nn.GELU()
         self.pretraining_tp = pretraining_tp
 
     def forward(self, x):
@@ -236,7 +236,7 @@ class Modulation(nn.Module):
         self.lin = nn.Linear(dim, self.multiplier * dim, bias=True)
 
     def forward(self, vec: torch.Tensor) -> tuple[ModulationOut, ModulationOut | None]:
-        out = self.lin(nn.functional.silu(vec))[:, None, :].chunk(self.multiplier, dim=-1)
+        out = self.lin(nn.functional.gelu(vec))[:, None, :].chunk(self.multiplier, dim=-1)
 
         return (
             ModulationOut(*out[:3]),
