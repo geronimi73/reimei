@@ -38,13 +38,6 @@ class TokenMixer(nn.Module):
             for _ in range(num_layers)
         ])
 
-    def initialize_weights(self):
-        """
-        Initialize weights for each DiTBlock.
-        """
-        for layer in self.layers:
-            layer.initialize_weights()
-
     def forward(
         self,
         img: torch.Tensor,       # [B, L_img, embed_dim]

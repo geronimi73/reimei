@@ -1,6 +1,6 @@
 from copy import deepcopy
 import torch
-from transformer.microdit import MicroDiT
+from transformer.microdit import ReiMei, ReiMeiParameters
 from accelerate import Accelerator
 from config import BS, EPOCHS, MASK_RATIO, VAE_SCALING_FACTOR, VAE_CHANNELS, VAE_HF_NAME, MODELS_DIR_BASE, DS_DIR_BASE, SEED, USERNAME, DATASET_NAME
 from config import DIT_S as DIT
@@ -92,6 +92,9 @@ if __name__ == "__main__":
     # Comment this out if you havent downloaded dataset and models yet
     datasets.config.HF_HUB_OFFLINE = 1
 
+    base_dim = 1024
+    base_heads = 16
+
     input_dim = VAE_CHANNELS
     embed_dim = 1024
     num_layers = 4
@@ -100,20 +103,36 @@ if __name__ == "__main__":
     cond_embed_dim = 1 # Null for this dataset
     # pos_embed_dim = 60
     pos_embed_dim = None
-    num_experts = 8
-    active_experts = 2
-    shared_experts = 2
+    num_experts = 1
+    active_experts = 1.0
+    shared_experts = None
     token_mixer_layers = 2
     dropout = 0.1
+
+    m_d = float(embed_dim) / float(base_dim)
+
+    assert (embed_dim // num_heads) == (base_dim // base_heads)
+
+    params = ReiMeiParameters(
+        channels=input_dim,
+        embed_dim=embed_dim,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        mlp_dim=mlp_dim,
+        text_embed_dim=cond_embed_dim,
+        vector_embed_dim=cond_embed_dim,
+        num_experts=num_experts,
+        active_experts=active_experts,
+        shared_experts=shared_experts,
+        dropout=dropout,
+        token_mixer_layers=token_mixer_layers,
+        m_d=m_d,
+    )
 
     accelerator = Accelerator()
     device = accelerator.device
 
-    model = MicroDiT(input_dim, embed_dim, num_layers, 
-                    num_heads, mlp_dim, cond_embed_dim, cond_embed_dim,
-                    num_experts, active_experts, shared_experts,
-                    dropout, token_mixer_layers
-    ).to(DTYPE)
+    model = ReiMei(params).to(DTYPE)
 
     print("Number of parameters: ", sum(p.numel() for p in model.parameters()))
 
@@ -123,9 +142,9 @@ if __name__ == "__main__":
     # dataset = load_dataset(f"{USERNAME}/{DATASET_NAME}", split="train", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}")
     dataset = MemmapDataset(f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth")
     dataset = DataLoader(dataset, batch_size=BS, shuffle=True, num_workers=0)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
 
-    scheduler = OneCycleLR(optimizer, max_lr=1e-3, steps_per_epoch=len(dataset), epochs=EPOCHS)
+    scheduler = OneCycleLR(optimizer, max_lr=1e-2, steps_per_epoch=len(dataset), epochs=EPOCHS)
 
     model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, dataset)
 

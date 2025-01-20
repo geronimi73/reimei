@@ -1,3 +1,4 @@
+import math
 import torch.nn as nn
 from .embed import sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
 from .utils import remove_masked_tokens, add_masked_tokens
@@ -5,23 +6,41 @@ from .backbone import TransformerBackbone
 from .token_mixer import TokenMixer
 import torch
 from config import VAE_SCALING_FACTOR
+from dataclasses import dataclass
 
-class MicroDiT(nn.Module):
+@dataclass
+class ReiMeiParameters:
+    channels: int
+    embed_dim: int
+    num_layers: int
+    num_heads: int
+    mlp_dim: int
+    text_embed_dim: int
+    vector_embed_dim: int
+    num_experts: int = 4
+    active_experts: int = 2
+    shared_experts: int = 2
+    dropout: float = 0.1
+    token_mixer_layers: int = 2
+    m_d: float = 1.0
+
+class ReiMei(nn.Module):
     """
-    MicroDiT is a image diffusion transformer model.
+    ReiMei is a image diffusion transformer model.
 
-    Args:
+        Args:
         channels (int): Number of input channels in the image data.
         embed_dim (int): Dimension of the embedding space.
         num_layers (int): Number of layers in the transformer backbone.
         num_heads (int): Number of attention heads in the multi-head attention mechanism.
         mlp_dim (int): Dimension of the multi-layer perceptron.
+        text_embed_dim (int): Dimension of the text embedding.
+        vector_embed_dim (int): Dimension of the vector embedding.
         num_experts (int, optional): Number of experts in the transformer backbone. Default is 4.
         active_experts (int, optional): Number of active experts in the transformer backbone. Default is 2.
         shared_experts (int, optional): Number of shared experts in the transformer backbone. Default is 2.
         dropout (float, optional): Dropout rate. Default is 0.1.
         patch_mixer_layers (int, optional): Number of layers in the patch mixer. Default is 2.
-        embed_cat (bool, optional): Whether to concatenate embeddings. Default is False. If true, the timestep, class, and positional embeddings are concatenated rather than summed.
 
     Attributes:
         embed_dim (int): Dimension of the embedding space.
@@ -34,13 +53,12 @@ class MicroDiT(nn.Module):
         backbone (TransformerBackbone): Transformer backbone model.
         output (MLPEmbedder): Output layer.
     """
-    def __init__(self, channels, embed_dim, num_layers, num_heads, mlp_dim, text_embed_dim, vector_embed_dim,
-                 num_experts=4, active_experts=2, shared_experts=2, dropout=0.1, patch_mixer_layers=2, embed_cat=False):
+    def __init__(self, params: ReiMeiParameters):
         super().__init__()
         
-        self.embed_dim = embed_dim
-        self.pos_emb_dim = embed_dim // num_heads
-        self.channels = channels
+        self.embed_dim = params.embed_dim
+        self.pos_emb_dim = params.embed_dim // params.num_heads
+        self.channels = params.channels
         
         # Timestep embedding
         self.time_embedder = TimestepEmbedder(self.embed_dim)
@@ -49,52 +67,57 @@ class MicroDiT(nn.Module):
         self.image_embedder = MLPEmbedder(self.channels, self.embed_dim)
         
         # Text embedding
-        self.text_embedder = MLPEmbedder(text_embed_dim, self.embed_dim)
+        self.text_embedder = MLPEmbedder(params.text_embed_dim, self.embed_dim)
 
         # Vector (y) embedding
-        self.vector_embedder = MLPEmbedder(vector_embed_dim, self.embed_dim)
+        self.vector_embedder = MLPEmbedder(params.vector_embed_dim, self.embed_dim)
         
         # TokenMixer
-        self.token_mixer = TokenMixer(self.embed_dim, num_heads, patch_mixer_layers, num_experts=num_experts, num_experts_per_tok=active_experts)
+        self.token_mixer = TokenMixer(self.embed_dim, params.num_heads, params.token_mixer_layers, num_experts=params.num_experts, num_experts_per_tok=params.active_experts)
         
         # Backbone transformer model
-        self.backbone = TransformerBackbone(self.embed_dim, self.embed_dim, self.embed_dim, num_layers, num_heads, mlp_dim, 
-                                        num_experts, active_experts, shared_experts, dropout)
+        self.backbone = TransformerBackbone(self.embed_dim, self.embed_dim, self.embed_dim, params.num_layers, params.num_heads, params.mlp_dim, 
+                                        params.num_experts, params.active_experts, params.shared_experts, params.dropout)
         
         self.output_layer = OutputLayer(self.embed_dim, self.channels)
 
-        self.initialize_weights()
+        self.initialize_weights(params.m_d)
 
-    def initialize_weights(self):
+    def initialize_weights(self, m_d):
         # Initialize all linear layers and biases
         def _basic_init(module):
-            if isinstance(module, MLPEmbedder):
-                # Initialize MLPEmbedder layers
-                nn.init.xavier_uniform_(module.mlp[0].weight)
-                nn.init.constant_(module.mlp[0].bias, 0)
-                nn.init.xavier_uniform_(module.mlp[2].weight)
-                nn.init.constant_(module.mlp[2].bias, 0)
-            elif isinstance(module, nn.LayerNorm):
+            if isinstance(module, nn.LayerNorm):
                 if module.weight is not None:
                     nn.init.constant_(module.weight, 1.0)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+
+        def _mup_init(module):
+            if isinstance(module, nn.Linear):
+                nn.init.normal_(module.weight, std=0.02 / math.sqrt(m_d))
 
         # Apply basic initialization to all modules
         self.apply(_basic_init)
+        self.apply(_mup_init)
 
-        # Timestep embedder
+        for embedder in [self.text_embedder, self.vector_embedder, self.image_embedder]:
+            nn.init.normal_(embedder.mlp[0].weight, std=0.02)
+            nn.init.normal_(embedder.mlp[2].weight, std=0.02)
+            nn.init.constant_(embedder.mlp[0].bias, 0)
+            nn.init.constant_(embedder.mlp[2].bias, 0)
+
         nn.init.normal_(self.time_embedder.mlp.mlp[0].weight, std=0.02)
-        nn.init.constant_(self.time_embedder.mlp.mlp[0].bias, 0)
         nn.init.normal_(self.time_embedder.mlp.mlp[2].weight, std=0.02)
+        nn.init.constant_(self.time_embedder.mlp.mlp[0].bias, 0)
         nn.init.constant_(self.time_embedder.mlp.mlp[2].bias, 0)
 
         # Zero-out the last linear layer in the output to ensure initial predictions are zero
-        nn.init.constant_(self.output_layer.mlp.mlp[-1].weight, 0)
-        nn.init.constant_(self.output_layer.mlp.mlp[-1].bias, 0)
-
-        self.backbone.initialize_weights()
-        self.token_mixer.initialize_weights()
+        nn.init.constant_(self.output_layer.mlp.weight, 0)
+        nn.init.constant_(self.output_layer.mlp.bias, 0)
 
     def forward(self, img, time, txt, vec, mask=None):
         # img: (batch_size, channels, height, width)

@@ -51,21 +51,6 @@ class TransformerBackbone(nn.Module):
 
         self.output_layer = nn.Linear(embed_dim, input_dim)
 
-        self.initialize_weights()
-
-    def initialize_weights(self):
-        def _basic_init(module):
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-
-        # Apply basic initialization to all modules
-        self.apply(_basic_init)
-
-        # Initialize DiTBlocks if any
-        for layer in self.layers:
-            layer.initialize_weights()
 
     def forward(self, x, text, vec, mask, original_h, original_w):
         x = self.image_embedding(x)
