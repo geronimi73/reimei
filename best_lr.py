@@ -8,8 +8,7 @@ from transformer.utils import random_mask, apply_mask_to_tensor
 from datasets import config as hf_config
 import numpy as np
 
-# Disable HF online checks if you have the dataset offline
-hf_config.HF_HUB_OFFLINE = 1
+hf_config.HF_HUB_OFFLINE = 1  # Disable HF checks if dataset is local
 
 DTYPE = torch.bfloat16
 
@@ -35,19 +34,19 @@ def lr_range_test(
 ):
     """
     Exponential LR range test (aka LR finder).
-    Returns (lrs, losses) for optional plotting.
+    Returns (lrs, losses).
     """
-    # Copy model so we don't affect main weights
+    # Copy model so we don't affect the main weights
     test_model = deepcopy(model)
     test_model.train()
-    # Re-init optimizer to ensure clean state
+
+    # Re-init the optimizer to ensure a clean state
     optimizer_copy = type(optimizer)(test_model.parameters(), lr=init_lr)
 
-    # Decide how many steps total
     if num_steps is None:
         num_steps = len(train_dataloader)
 
-    # Calculate the multiplier per step
+    # Exponential LR multiplier
     lr_mult = (final_lr / init_lr) ** (1 / num_steps)
     lr = init_lr
 
@@ -69,7 +68,7 @@ def lr_range_test(
         latents = latents.to(device, dtype=dtype)
         bs, c, h, w = latents.shape
 
-        # Null text embeddings for your dataset
+        # Null text embeddings
         cond_embed_dim = 1
         caption_embeddings = torch.zeros((bs, cond_embed_dim), device=device, dtype=dtype)
 
@@ -77,7 +76,8 @@ def lr_range_test(
         latents_scaled = latents * VAE_SCALING_FACTOR
 
         # Random mask
-        mask = random_mask(bs, latents_scaled.shape[-2], latents_scaled.shape[-1], mask_ratio=MASK_RATIO).to(device, dtype=dtype)
+        mask = random_mask(bs, latents_scaled.shape[-2], latents_scaled.shape[-1],
+                           mask_ratio=MASK_RATIO).to(device, dtype=dtype)
 
         # Time conditioning
         nt = torch.randn((bs,), device=device, dtype=dtype)
@@ -95,7 +95,6 @@ def lr_range_test(
         sample_theta_masked = apply_mask_to_tensor(sample_theta, mask)
 
         batchwise_mse = ((sample_theta_masked - latents_masked) ** 2).mean()
-        # Weighted by the unmasked proportion
         loss = batchwise_mse * (1 / (1 - MASK_RATIO))
 
         # Backprop
@@ -114,7 +113,7 @@ def lr_range_test(
         lrs.append(lr)
         losses.append(smoothed_loss)
 
-        # Stop if loss diverges too much
+        # Stop if the loss diverges too much
         if (batch_idx > 1 and smoothed_loss > 4 * best_loss):
             print("Loss diverged; stopping early.")
             break
@@ -125,91 +124,101 @@ def lr_range_test(
 
     return lrs, losses
 
-
 if __name__ == "__main__":
     accelerator = Accelerator()
     device = accelerator.device
 
-    # Model params
+    # ----------------- Common Hyperparams ------------------
     base_dim = 1024
     base_heads = 16
-    embed_dim = 1024
-    num_heads = 16
-    num_layers = 4
+    embed_dim = 1024       # Keep embed_dim fixed here
+    num_heads = 16         # Since embed_dim=1024 and base_dim=1024, head_dim = 64
     mlp_dim = embed_dim
     cond_embed_dim = 1
-    num_experts = 1
-    active_experts = 1.0
-    shared_experts = None
-    token_mixer_layers = 2
     dropout = 0.1
+    token_mixer_layers = 2
 
-    m_d = float(embed_dim) / float(base_dim)
-    assert (embed_dim // num_heads) == (base_dim // base_heads)
-
-    # Build ReiMei model
-    params = ReiMeiParameters(
-        channels=VAE_CHANNELS,
-        embed_dim=embed_dim,
-        num_layers=num_layers,
-        num_heads=num_heads,
-        mlp_dim=mlp_dim,
-        text_embed_dim=cond_embed_dim,
-        vector_embed_dim=cond_embed_dim,
-        num_experts=num_experts,
-        active_experts=active_experts,
-        shared_experts=shared_experts,
-        dropout=dropout,
-        token_mixer_layers=token_mixer_layers,
-        m_d=m_d,
-    )
-
-    model = ReiMei(params).to(DTYPE)
-
-    print("Number of parameters:", sum(p.numel() for p in model.parameters()))
+    # The sets of hyperparameters we want to compare
+    layers_list = [2, 4]
+    experts_list = [4, 8, 16]
 
     # Dataset & DataLoader
     dataset_path = f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth"
     train_dataset = MemmapDataset(dataset_path)
     train_dataloader = DataLoader(train_dataset, batch_size=BS, shuffle=True, num_workers=0)
+    train_dataloader = accelerator.prepare(train_dataloader)
 
-    # Prepare model & data with accelerator
-    model, train_dataloader = accelerator.prepare(model, train_dataloader)
+    # We'll store LR/loss curves for each (num_layers, num_experts) combo
+    curves_dict = {}  # { (layers, experts): (lrs, losses) }
 
-    # Create an optimizer (we won't do normal multi-epoch training here)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-7)
-
-    # Configure LR range test
+    # LR range test parameters
     init_lr = 1e-7
     final_lr = 1e-2
-    num_steps = 500  # e.g., do 500 steps
+    num_steps = 300
 
-    print(f"Running LR range test from {init_lr} to {final_lr} for {num_steps} steps.")
-    lrs, losses = lr_range_test(
-        model,
-        train_dataloader,
-        optimizer,
-        init_lr=init_lr,
-        final_lr=final_lr,
-        num_steps=num_steps,
-        device=device,
-        dtype=DTYPE,
-    )
+    m_d = float(embed_dim) / float(base_dim)
+    # The assertion must still hold: (embed_dim // num_heads) == (base_dim // base_heads)
 
-    # Only save plot on main process
+    for nl in layers_list:
+        for nx in experts_list:
+            print(f"\n=== LR Range Test for num_layers={nl}, num_experts={nx} ===")
+
+            # Build a fresh model
+            from transformer.microdit import ReiMeiParameters
+            params = ReiMeiParameters(
+                channels=VAE_CHANNELS,
+                embed_dim=embed_dim,
+                num_layers=nl,
+                num_heads=num_heads,
+                mlp_dim=mlp_dim,
+                text_embed_dim=cond_embed_dim,
+                vector_embed_dim=cond_embed_dim,
+                num_experts=nx,
+                active_experts=1.0,
+                shared_experts=None,
+                dropout=dropout,
+                token_mixer_layers=token_mixer_layers,
+                m_d=m_d,
+            )
+            model = ReiMei(params).to(DTYPE)
+            model = accelerator.prepare(model)
+
+            # New optimizer
+            optimizer = torch.optim.AdamW(model.parameters(), lr=init_lr)
+
+            lrs, losses = lr_range_test(
+                model,
+                train_dataloader,
+                optimizer,
+                init_lr=init_lr,
+                final_lr=final_lr,
+                num_steps=num_steps,
+                device=device,
+                dtype=DTYPE,
+            )
+            curves_dict[(nl, nx)] = (lrs, losses)
+
+    # ----------------- Plot all combos on one graph ------------------
     if accelerator.is_main_process:
         import matplotlib.pyplot as plt
-
         plt.figure()
-        plt.plot(lrs, losses)
+
+        for (nl, nx), (lrs, losses) in curves_dict.items():
+            label_str = f"L={nl}, Experts={nx}"
+            plt.plot(lrs, losses, label=label_str)
+        
         plt.xscale("log")
         plt.xlabel("Learning Rate (log scale)")
         plt.ylabel("Smoothed Loss")
-        plt.title(f"LR Range Test (embed_dim={embed_dim}, num_layers={num_layers})")
+        plt.ylim(bottom=1.65, top=2.2)
+        plt.title("LR Range Test: layers vs. num_experts (embed_dim=1024)")
+        plt.legend()
 
-        plot_filename = f"lr_range_test_embed_{embed_dim}_layers_{num_layers}.png"
+        import os
+        os.makedirs("lr_graphs", exist_ok=True)
+        plot_filename = "lr_graphs/lr_layers_vs_experts.png"
         plt.savefig(plot_filename)
         plt.close()
 
-        print("\nLR range test complete. Saved plot as:", plot_filename)
-        print("Inspect the curve and pick an LR below the point it starts to diverge.")
+        print(f"\nAll LR range tests complete. Combined plot saved to: {plot_filename}")
+        print("All lines are in one graph with y-limits from 1.65 to 2.2.")
