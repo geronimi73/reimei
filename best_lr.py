@@ -3,14 +3,24 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from transformer.microdit import ReiMei, ReiMeiParameters
 from accelerate import Accelerator
-from config import BS, MASK_RATIO, VAE_SCALING_FACTOR, VAE_CHANNELS, DS_DIR_BASE
+from config import BS, EPOCHS, MASK_RATIO, AE_SCALING_FACTOR, AE_CHANNELS, AE_HF_NAME, MODELS_DIR_BASE, DS_DIR_BASE, SEED, USERNAME, DATASET_NAME
 from transformer.utils import random_mask, apply_mask_to_tensor
 from datasets import config as hf_config
 import numpy as np
+from datasets import load_dataset
+from tqdm import tqdm
 
 hf_config.HF_HUB_OFFLINE = 1  # Disable HF checks if dataset is local
 
 DTYPE = torch.bfloat16
+
+def batch_to_tensors(batch):
+    latents = batch["latent"]
+    latents = torch.stack(
+    [torch.stack([torch.stack(inner) for inner in outer]) for outer in latents]
+    )
+    latents = latents.permute(3, 0, 1, 2) # for some reason batch size is last so we need to permute it
+    return latents
 
 class MemmapDataset(Dataset):
     def __init__(self, data_path):
@@ -57,7 +67,7 @@ def lr_range_test(
     losses = []
 
     step_count = 0
-    for batch_idx, latents in enumerate(train_dataloader):
+    for batch_idx, latents in tqdm(enumerate(train_dataloader)):
         if step_count >= num_steps:
             break
 
@@ -65,7 +75,8 @@ def lr_range_test(
         for param_group in optimizer_copy.param_groups:
             param_group['lr'] = lr
         
-        latents = latents.to(device, dtype=dtype)
+        latents = batch_to_tensors(latents).to(device, DTYPE)
+        # latents = latents.to(device, dtype=dtype)
         bs, c, h, w = latents.shape
 
         # Null text embeddings
@@ -73,7 +84,7 @@ def lr_range_test(
         caption_embeddings = torch.zeros((bs, cond_embed_dim), device=device, dtype=dtype)
 
         # Scale latents
-        latents_scaled = latents * VAE_SCALING_FACTOR
+        latents_scaled = latents * AE_SCALING_FACTOR
 
         # Random mask
         mask = random_mask(bs, latents_scaled.shape[-2], latents_scaled.shape[-1],
@@ -139,12 +150,15 @@ if __name__ == "__main__":
     token_mixer_layers = 2
 
     # The sets of hyperparameters we want to compare
-    layers_list = [2, 4]
-    experts_list = [4, 8, 16]
+    # layers_list = [2, 4]
+    # experts_list = [4, 8, 16]
+    layers_list = [2]
+    experts_list = [2]
 
     # Dataset & DataLoader
-    dataset_path = f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth"
-    train_dataset = MemmapDataset(dataset_path)
+    # dataset_path = f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth"
+    # train_dataset = MemmapDataset(dataset_path)
+    train_dataset = load_dataset(f"{USERNAME}/{DATASET_NAME}", split="train", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}")
     train_dataloader = DataLoader(train_dataset, batch_size=BS, shuffle=True, num_workers=0)
     train_dataloader = accelerator.prepare(train_dataloader)
 
@@ -153,7 +167,7 @@ if __name__ == "__main__":
 
     # LR range test parameters
     init_lr = 1e-7
-    final_lr = 1e-2
+    final_lr = 5e-3
     num_steps = 300
 
     m_d = float(embed_dim) / float(base_dim)
@@ -166,7 +180,7 @@ if __name__ == "__main__":
             # Build a fresh model
             from transformer.microdit import ReiMeiParameters
             params = ReiMeiParameters(
-                channels=VAE_CHANNELS,
+                channels=AE_CHANNELS,
                 embed_dim=embed_dim,
                 num_layers=nl,
                 num_heads=num_heads,
@@ -210,13 +224,13 @@ if __name__ == "__main__":
         plt.xscale("log")
         plt.xlabel("Learning Rate (log scale)")
         plt.ylabel("Smoothed Loss")
-        plt.ylim(bottom=1.65, top=2.2)
+        plt.ylim(bottom=1.2, top=1.6)
         plt.title("LR Range Test: layers vs. num_experts (embed_dim=1024)")
         plt.legend()
 
         import os
         os.makedirs("lr_graphs", exist_ok=True)
-        plot_filename = "lr_graphs/lr_layers_vs_experts.png"
+        plot_filename = "lr_graphs/lr_layers_vs_experts_1024.png"
         plt.savefig(plot_filename)
         plt.close()
 

@@ -5,7 +5,7 @@ from .utils import remove_masked_tokens, add_masked_tokens
 from .backbone import TransformerBackbone
 from .token_mixer import TokenMixer
 import torch
-from config import VAE_SCALING_FACTOR
+from config import AE_SCALING_FACTOR
 from dataclasses import dataclass
 
 @dataclass
@@ -15,8 +15,8 @@ class ReiMeiParameters:
     num_layers: int
     num_heads: int
     mlp_dim: int
-    text_embed_dim: int
-    vector_embed_dim: int
+    siglip_dim: int
+    bert_dim: int
     num_experts: int = 4
     active_experts: int = 2
     shared_experts: int = 2
@@ -67,10 +67,11 @@ class ReiMei(nn.Module):
         self.image_embedder = MLPEmbedder(self.channels, self.embed_dim)
         
         # Text embedding
-        self.text_embedder = MLPEmbedder(params.text_embed_dim, self.embed_dim)
+        self.siglip_embedder = MLPEmbedder(params.siglip_dim, self.embed_dim)
+        self.bert_embedder = MLPEmbedder(params.bert_dim, self.embed_dim)
 
         # Vector (y) embedding
-        self.vector_embedder = MLPEmbedder(params.vector_embed_dim, self.embed_dim)
+        self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim)
         
         # TokenMixer
         self.token_mixer = TokenMixer(self.embed_dim, params.num_heads, params.token_mixer_layers, num_experts=params.num_experts, num_experts_per_tok=params.active_experts)
@@ -104,7 +105,7 @@ class ReiMei(nn.Module):
         self.apply(_basic_init)
         self.apply(_mup_init)
 
-        for embedder in [self.text_embedder, self.vector_embedder, self.image_embedder]:
+        for embedder in [self.siglip_embedder, self.bert_embedder, self.vector_embedder, self.image_embedder]:
             nn.init.normal_(embedder.mlp[0].weight, std=0.02)
             nn.init.normal_(embedder.mlp[2].weight, std=0.02)
             nn.init.constant_(embedder.mlp[0].bias, 0)
@@ -119,20 +120,28 @@ class ReiMei(nn.Module):
         nn.init.constant_(self.output_layer.mlp.weight, 0)
         nn.init.constant_(self.output_layer.mlp.bias, 0)
 
-    def forward(self, img, time, txt, vec, mask=None):
+    def forward(self, img, time, sig_txt, sig_vec, bert_txt, bert_vec, mask=None):
         # img: (batch_size, channels, height, width)
         # time: (batch_size, 1)
-        # text: (batch_size, seq_len, text_embed_dim)
-        # vec: (batch_size, vector_embed_dim)
+        # sig_txt: (batch_size, seq_len, siglip_dim)
+        # sig_vec: (batch_size, siglip_dim)
+        # bert_txt: (batch_size, seq_len, bert_dim)
+        # bert_vec: (batch_size, bert_dim)
         # mask: (batch_size, num_tokens)
         batch_size, channels, height, width = img.shape
 
         # Reshape and transmute img to have shape (batch_size, height*width, channels)
         img = img.permute(0, 2, 3, 1).contiguous().view(batch_size, height * width, channels)
 
-        time = self.time_embedder(time)
+        # Text embeddings
+        sig_txt = self.siglip_embedder(sig_txt)
+        bert_txt = self.bert_embedder(bert_txt)
+        txt = torch.cat([sig_txt, bert_txt], dim=1)
         
         # Vector embedding (timestep + vector_embeddings)
+        time = self.time_embedder(time)
+
+        vec = torch.cat([sig_vec, bert_vec], dim=1)
         vec = self.vector_embedder(vec) + time  # (batch_size, embed_dim)
 
         # Image embedding
@@ -143,9 +152,6 @@ class ReiMei(nn.Module):
         sincos_pos_embed = sincos_pos_embed.to(img.device).unsqueeze(0).expand(batch_size, -1, -1)
         
         img = img + sincos_pos_embed
-
-        # Caption embedding
-        txt = self.text_embedder(txt)  # (batch_size, embed_dim)
 
         # Patch-mixer
         img, txt = self.token_mixer(img, txt, vec, height, width)
@@ -171,7 +177,7 @@ class ReiMei(nn.Module):
         return img
     
     @torch.no_grad()
-    def sample(model, z, cond, vec, null_cond=None, sample_steps=2, cfg=2.0):
+    def sample(model, z, sig_txt, sig_vec, bert_txt, bert_vec, null_cond=None, sample_steps=2, cfg=2.0):
         b = z.size(0)
         dt = 1.0 / sample_steps
         dt = torch.tensor([dt] * b).to(z.device, torch.bfloat16).view([b, *([1] * len(z.shape[1:]))])
@@ -181,7 +187,7 @@ class ReiMei(nn.Module):
             t = i / sample_steps
             t = torch.tensor([t] * b).to(z.device, torch.bfloat16)
 
-            vc = model(z, t, cond, vec, None).to(torch.bfloat16)
+            vc = model(z, t, sig_txt, sig_vec, bert_txt, bert_vec, None).to(torch.bfloat16)
             # if null_cond is not None:
             #     vu = model(z, t, null_cond)
             #     vc = vu + cfg * (vc - vu)
@@ -189,4 +195,4 @@ class ReiMei(nn.Module):
             z = z - dt * vc
             images.append(z)
 
-        return (images[-1] / VAE_SCALING_FACTOR)
+        return (images[-1] / AE_SCALING_FACTOR)

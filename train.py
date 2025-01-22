@@ -2,7 +2,7 @@ from copy import deepcopy
 import torch
 from transformer.microdit import ReiMei, ReiMeiParameters
 from accelerate import Accelerator
-from config import BS, EPOCHS, MASK_RATIO, VAE_SCALING_FACTOR, VAE_CHANNELS, VAE_HF_NAME, MODELS_DIR_BASE, DS_DIR_BASE, SEED, USERNAME, DATASET_NAME
+from config import BS, EPOCHS, MASK_RATIO, AE_SCALING_FACTOR, AE_CHANNELS, AE_HF_NAME, MODELS_DIR_BASE, DS_DIR_BASE, SEED, USERNAME, DATASET_NAME, LR
 from config import DIT_S as DIT
 from datasets import load_dataset
 # from dataset.shapebatching_dataset import ShapeBatchingDataset
@@ -71,7 +71,7 @@ def sample(model, z, cond, vec, null_cond=None, sample_steps=2, cfg=2.0):
         z = z - dt * vc
         images.append(z)
 
-    return (images[-1] / VAE_SCALING_FACTOR)
+    return (images[-1] / AE_SCALING_FACTOR)
 
 def batch_to_tensors(batch):
     latents = batch["latent"]
@@ -95,18 +95,18 @@ if __name__ == "__main__":
     base_dim = 1024
     base_heads = 16
 
-    input_dim = VAE_CHANNELS
+    input_dim = AE_CHANNELS
     embed_dim = 1024
-    num_layers = 4
+    num_layers = 28
     num_heads = 16
-    mlp_dim = 2048 / 4
+    mlp_dim = embed_dim
     cond_embed_dim = 1 # Null for this dataset
     # pos_embed_dim = 60
     pos_embed_dim = None
-    num_experts = 1
-    active_experts = 1.0
+    num_experts = 32
+    active_experts = 2.0
     shared_experts = None
-    token_mixer_layers = 2
+    token_mixer_layers = 1
     dropout = 0.1
 
     m_d = float(embed_dim) / float(base_dim)
@@ -142,9 +142,9 @@ if __name__ == "__main__":
     # dataset = load_dataset(f"{USERNAME}/{DATASET_NAME}", split="train", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}")
     dataset = MemmapDataset(f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth")
     dataset = DataLoader(dataset, batch_size=BS, shuffle=True, num_workers=0)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
 
-    scheduler = OneCycleLR(optimizer, max_lr=1e-2, steps_per_epoch=len(dataset), epochs=EPOCHS)
+    scheduler = OneCycleLR(optimizer, max_lr=LR, steps_per_epoch=len(dataset), epochs=EPOCHS)
 
     model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, dataset)
 
@@ -156,11 +156,11 @@ if __name__ == "__main__":
     
     if accelerator.is_main_process:
         dc_ae = AutoencoderDC.from_pretrained("mit-han-lab/dc-ae-f32c32-in-1.0-diffusers", torch_dtype=DTYPE, cache_dir=f"{MODELS_DIR_BASE}/dc_ae", revision="main").to(device).eval()
-        assert dc_ae.config.scaling_factor == VAE_SCALING_FACTOR, f"Scaling factor mismatch: {dc_ae.config.scaling_factor} != {VAE_SCALING_FACTOR}"
+        assert dc_ae.config.scaling_factor == AE_SCALING_FACTOR, f"Scaling factor mismatch: {dc_ae.config.scaling_factor} != {AE_SCALING_FACTOR}"
         
         os.makedirs("logs", exist_ok=True)
 
-        noise = torch.randn(9, VAE_CHANNELS, 8, 8).to(device, dtype=DTYPE)
+        noise = torch.randn(9, AE_CHANNELS, 8, 8).to(device, dtype=DTYPE)
         example_batch = next(iter(dataset))
         # example_embeddings = example_batch["text_embedding"][:9].to(device)
         # example_captions = example_batch["caption"][:9]
@@ -200,7 +200,7 @@ if __name__ == "__main__":
             # Null caption embeddings for this dataset
             caption_embeddings = torch.zeros((bs, cond_embed_dim), device=device, dtype=DTYPE)
 
-            latents = latents * VAE_SCALING_FACTOR
+            latents = latents * AE_SCALING_FACTOR
 
             mask = random_mask(bs, latents.shape[-2], latents.shape[-1], mask_ratio=MASK_RATIO).to(device, dtype=DTYPE)
 
