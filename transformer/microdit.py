@@ -2,7 +2,7 @@ import math
 import torch.nn as nn
 from .embed import sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
 from .utils import remove_masked_tokens, add_masked_tokens
-from .backbone import TransformerBackbone
+from .backbone import BackboneParams, TransformerBackbone
 from .token_mixer import TokenMixer
 import torch
 from config import AE_SCALING_FACTOR
@@ -22,6 +22,7 @@ class ReiMeiParameters:
     shared_experts: int = 2
     dropout: float = 0.1
     token_mixer_layers: int = 2
+    image_text_expert_ratio: int = 4
     m_d: float = 1.0
 
 class ReiMei(nn.Module):
@@ -75,10 +76,23 @@ class ReiMei(nn.Module):
         
         # TokenMixer
         self.token_mixer = TokenMixer(self.embed_dim, params.num_heads, params.token_mixer_layers, num_experts=params.num_experts, num_experts_per_tok=params.active_experts)
-        
+
+        backbone_params = BackboneParams(
+            input_dim=self.channels,
+            embed_dim=self.embed_dim,
+            num_layers=params.num_layers,
+            num_heads=params.num_heads,
+            mlp_dim=params.mlp_dim,
+            num_experts=params.num_experts,
+            active_experts=params.active_experts,
+            shared_experts=params.shared_experts,
+            dropout=params.dropout,
+            image_text_expert_ratio=params.image_text_expert_ratio,
+            pretraining_tp=params.pretraining_tp,
+        )
+
         # Backbone transformer model
-        self.backbone = TransformerBackbone(self.embed_dim, self.embed_dim, self.embed_dim, params.num_layers, params.num_heads, params.mlp_dim, 
-                                        params.num_experts, params.active_experts, params.shared_experts, params.dropout)
+        self.backbone = TransformerBackbone(backbone_params)
         
         self.output_layer = OutputLayer(self.embed_dim, self.channels)
 

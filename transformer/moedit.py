@@ -418,7 +418,8 @@ class DoubleStreamBlock(nn.Module):
         num_experts_per_tok=2,
         pretraining_tp=2,
         num_shared_experts=2,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        exp_ratio: int = 4
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -443,11 +444,14 @@ class DoubleStreamBlock(nn.Module):
         # MoE blocks instead of standard MLP
         self.img_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.txt_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+
+        text_exps = max(1, num_experts // exp_ratio)
+
         self.img_moe = SparseMoeBlock(
             hidden_size, mlp_ratio, num_experts, num_experts_per_tok, pretraining_tp, num_shared_experts
         )
         self.txt_moe = SparseMoeBlock(
-            hidden_size, mlp_ratio, num_experts, num_experts_per_tok, pretraining_tp, num_shared_experts
+            hidden_size, mlp_ratio, text_exps, num_experts_per_tok, pretraining_tp, num_shared_experts
         )
 
     def forward(
