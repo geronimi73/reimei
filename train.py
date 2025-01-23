@@ -1,6 +1,6 @@
 from copy import deepcopy
 import torch
-from transformer.microdit import ReiMei, ReiMeiParameters
+from transformer.reimei import ReiMei, ReiMeiParameters
 from accelerate import Accelerator
 from config import BS, EPOCHS, MASK_RATIO, AE_SCALING_FACTOR, AE_CHANNELS, AE_HF_NAME, MODELS_DIR_BASE, DS_DIR_BASE, SEED, USERNAME, DATASET_NAME, LR
 from config import DIT_S as DIT

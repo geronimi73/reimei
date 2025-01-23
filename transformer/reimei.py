@@ -23,7 +23,7 @@ class ReiMeiParameters:
     dropout: float = 0.1
     token_mixer_layers: int = 2
     image_text_expert_ratio: int = 4
-    m_d: float = 1.0
+    # m_d: float = 1.0
 
 class ReiMei(nn.Module):
     """
@@ -95,9 +95,9 @@ class ReiMei(nn.Module):
         
         self.output_layer = OutputLayer(self.embed_dim, self.channels)
 
-        self.initialize_weights(params.m_d)
+        self.initialize_weights()
 
-    def initialize_weights(self, m_d):
+    def initialize_weights(self):
         # Initialize all linear layers and biases
         def _basic_init(module):
             if isinstance(module, nn.LayerNorm):
@@ -110,13 +110,13 @@ class ReiMei(nn.Module):
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
 
-        def _mup_init(module):
-            if isinstance(module, nn.Linear):
-                nn.init.normal_(module.weight, std=0.02 / math.sqrt(m_d))
+        # def _mup_init(module):
+        #     if isinstance(module, nn.Linear):
+        #         nn.init.normal_(module.weight, std=0.02 / math.sqrt(m_d))
 
         # Apply basic initialization to all modules
         self.apply(_basic_init)
-        self.apply(_mup_init)
+        # self.apply(_mup_init)
 
         for embedder in [self.siglip_embedder, self.bert_embedder, self.vector_embedder, self.image_embedder]:
             nn.init.normal_(embedder.mlp[0].weight, std=0.02)

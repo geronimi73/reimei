@@ -1,7 +1,7 @@
 from copy import deepcopy
 import torch
 from torch.utils.data import DataLoader, Dataset
-from transformer.microdit import ReiMei, ReiMeiParameters
+from transformer.reimei import ReiMei, ReiMeiParameters
 from accelerate import Accelerator
 from config import BS, EPOCHS, MASK_RATIO, AE_SCALING_FACTOR, AE_CHANNELS, AE_HF_NAME, MODELS_DIR_BASE, DS_DIR_BASE, SEED, USERNAME, DATASET_NAME
 from transformer.utils import random_mask, apply_mask_to_tensor
@@ -178,7 +178,7 @@ if __name__ == "__main__":
             print(f"\n=== LR Range Test for num_layers={nl}, num_experts={nx} ===")
 
             # Build a fresh model
-            from transformer.microdit import ReiMeiParameters
+            from transformer.reimei import ReiMeiParameters
             params = ReiMeiParameters(
                 channels=AE_CHANNELS,
                 embed_dim=embed_dim,
