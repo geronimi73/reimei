@@ -60,6 +60,6 @@ class TransformerBackbone(nn.Module):
 
     def forward(self, x, text, vec, mask, original_h, original_w):
         for layer in self.layers:
-            x, text_emb = layer(x, text_emb, vec, mask, original_h, original_w)
+            x, text = layer(x, text, vec, mask, original_h, original_w)
 
         return x

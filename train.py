@@ -104,6 +104,7 @@ if __name__ == "__main__":
     # pos_embed_dim = 60
     pos_embed_dim = None
     num_experts = 32
+    image_text_expert_ratio = 8
     active_experts = 2.0
     shared_experts = None
     token_mixer_layers = 1
@@ -126,6 +127,7 @@ if __name__ == "__main__":
         shared_experts=shared_experts,
         dropout=dropout,
         token_mixer_layers=token_mixer_layers,
+        image_text_expert_ratio=image_text_expert_ratio,
         m_d=m_d,
     )
 

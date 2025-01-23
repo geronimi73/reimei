@@ -88,7 +88,6 @@ class ReiMei(nn.Module):
             shared_experts=params.shared_experts,
             dropout=params.dropout,
             image_text_expert_ratio=params.image_text_expert_ratio,
-            pretraining_tp=params.pretraining_tp,
         )
 
         # Backbone transformer model
