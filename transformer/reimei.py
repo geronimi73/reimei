@@ -1,5 +1,6 @@
 import math
 import torch.nn as nn
+from torch.nn.modules.normalization import RMSNorm
 from .embed import sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
 from .utils import remove_masked_tokens, add_masked_tokens
 from .backbone import BackboneParams, TransformerBackbone
@@ -70,6 +71,9 @@ class ReiMei(nn.Module):
         # Text embedding
         self.siglip_embedder = MLPEmbedder(params.siglip_dim, self.embed_dim)
         self.bert_embedder = MLPEmbedder(params.bert_dim, self.embed_dim)
+
+        # Only bert needs normalization, siglip embeddings are in reasonable range
+        self.bert_norm = RMSNorm(params.bert_dim)
 
         # Vector (y) embedding
         self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim)
@@ -148,13 +152,13 @@ class ReiMei(nn.Module):
 
         # Text embeddings
         sig_txt = self.siglip_embedder(sig_txt)
-        bert_txt = self.bert_embedder(bert_txt)
+        bert_txt = self.bert_embedder(self.bert_norm(bert_txt))
         txt = torch.cat([sig_txt, bert_txt], dim=1)
         
         # Vector embedding (timestep + vector_embeddings)
         time = self.time_embedder(time)
 
-        vec = torch.cat([sig_vec, bert_vec], dim=1)
+        vec = torch.cat([sig_vec, self.bert_norm(bert_vec)], dim=1)
         vec = self.vector_embedder(vec) + time  # (batch_size, embed_dim)
 
         # Image embedding

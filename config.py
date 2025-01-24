@@ -11,7 +11,7 @@ SEED = 42
 
 LR = 6e-4
 
-AE_HF_NAME = "dc-ae-f32c32-mix-1.0"
+AE_HF_NAME = "dc-ae-f32c32-mix-1.0-diffusers"
 AE_CHANNELS = 32
 SIGLIP_HF_NAME = "google/siglip-so400m-patch14-384"
 SIGLIP_EMBED_DIM = 1152
