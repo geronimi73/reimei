@@ -303,11 +303,11 @@ def process_parquets(rank, world_size, queue, process_progress, total_files, tot
 
     siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device)
     siglip_tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
-    siglip = TextEmbedder(siglip_model, siglip_tokenizer, device)
+    siglip = TextEmbedder(siglip_model, siglip_tokenizer, device, cls=False)
 
     bert_model = ModernBertModel.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert").to(device)
     bert_tokenizer = AutoTokenizer.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert")
-    bert = TextEmbedder(bert_model, bert_tokenizer, device)
+    bert = TextEmbedder(bert_model, bert_tokenizer, device, cls=True)
 
     captions_json = hf_hub_download("SwayStar123/preprocessed_commoncatalog-cc-by", filename="prompts.json", repo_type="dataset", local_dir=f"commoncatalog-cc-by_captions")
     captions_json = json.load(open(captions_json))
@@ -347,21 +347,21 @@ def process_parquets(rank, world_size, queue, process_progress, total_files, tot
             latents = ae.generate(image_tensors)
             
             # Generate text embeddings
-            sig_emb, sig_vec, sig_unpad = siglip.generate(captions, device)
-            bert_emb, bert_vec, bert_unpad = bert.generate(captions, device)
+            sig_emb, sig_vec, sig_unpad = siglip.generate(captions)
+            bert_emb, bert_vec, bert_unpad = bert.generate(captions)
             
             # Add only processed outputs to new rows
             for i in range(len(batch)):
                 new_row = {
                     'image_id': batch[IMAGE_ID_COLUMN_NAME][i].as_py(),
                     'caption': captions[i],
-                    'ae_latent': latents[i].cpu().numpy().flatten(),
+                    'ae_latent': latents[i].cpu().to(torch.float16).numpy().flatten(),
                     'ae_latent_shape': latents[i].shape,  # Store shape separately
-                    'siglip_emb': sig_emb[i].cpu().numpy().flatten(),
-                    'siglip_vec': sig_vec[i].cpu().numpy().flatten(),
+                    'siglip_emb': sig_emb[i].cpu().to(torch.float16).numpy().flatten(),
+                    'siglip_vec': sig_vec[i].cpu().to(torch.float16).numpy().flatten(),
                     'siglip_unpadded_len': sig_unpad[i],
-                    'bert_emb': bert_emb[i].cpu().numpy().flatten(),
-                    'bert_vec': bert_vec[i].cpu().numpy().flatten(),
+                    'bert_emb': bert_emb[i].cpu().to(torch.float16).numpy().flatten(),
+                    'bert_vec': bert_vec[i].cpu().to(torch.float16).numpy().flatten(),
                     'bert_unpadded_len': bert_unpad[i],
                 }
                 new_rows.append(new_row)

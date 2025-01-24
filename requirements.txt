@@ -10,3 +10,6 @@ huggingface_hub[cli]
 hf_transfer
 tensorboard
 matplotlib
+protobuf
+sentencepiece
+tqdm
