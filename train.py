@@ -157,7 +157,7 @@ if __name__ == "__main__":
     # del checkpoint
     
     if accelerator.is_main_process:
-        dc_ae = AutoencoderDC.from_pretrained("mit-han-lab/dc-ae-f32c32-in-1.0-diffusers", torch_dtype=DTYPE, cache_dir=f"{MODELS_DIR_BASE}/dc_ae", revision="main").to(device).eval()
+        dc_ae = AutoencoderDC.from_pretrained(f"mit-han-lab/{AE_HF_NAME}", torch_dtype=DTYPE, cache_dir=f"{MODELS_DIR_BASE}/dc_ae", revision="main").to(device).eval()
         assert dc_ae.config.scaling_factor == AE_SCALING_FACTOR, f"Scaling factor mismatch: {dc_ae.config.scaling_factor} != {AE_SCALING_FACTOR}"
         
         os.makedirs("logs", exist_ok=True)

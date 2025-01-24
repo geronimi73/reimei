@@ -13,3 +13,4 @@ matplotlib
 protobuf
 sentencepiece
 tqdm
+pillow-simd

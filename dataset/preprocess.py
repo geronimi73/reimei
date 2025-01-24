@@ -10,11 +10,11 @@ import numpy as np
 from PIL import Image
 from torchvision import transforms
 from torch.multiprocessing import Queue, Process, Value, Event, set_start_method
-import torch.distributed as dist
 from tqdm import tqdm
 from huggingface_hub import HfFileSystem, hf_hub_download, HfApi
 import threading
 import io
+import concurrent.futures
 
 DATASET = "commoncatalog-cc-by"
 DATASET_DIR_BASE = "../datasets"
@@ -293,12 +293,39 @@ def upload_worker(upload_queue, upload_complete_event):
         else:
             print(f"Failed to upload: {file_path}")
 
+def single_image_process(image_bytes, new_resolution):
+    """Convert bytes -> PIL -> resize & crop -> to tensor -> normalize."""
+    image = Image.open(io.BytesIO(image_bytes))
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
+    image = resize_and_crop(image, new_resolution)  # your existing function
+    return preprocess_image(image)                  # your existing function
+
+def process_images_threaded(batch, image_col, new_resolution, max_workers=16):
+    """Process a list of image bytes in parallel using threads."""
+    # Extract bytes from the parquet batch
+    image_bytes_list = [batch[image_col][i].as_py() for i in range(len(batch))]
+
+    # Run parallel processing
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        processed_list = list(
+            executor.map(
+                lambda x: single_image_process(x, new_resolution),
+                image_bytes_list
+            )
+        )
+
+    # Stack into a single tensor
+    images_tensor = torch.stack(processed_list, dim=0)
+    return images_tensor
+
+
 def process_parquets(rank, world_size, queue, process_progress, total_files, total_images, download_complete_event, tracking_file, upload_queue):
     # Move CUDA initialization inside this function
     torch.cuda.set_device(rank)
     device = f"cuda:{rank}"
 
-    ae = AutoencoderDC.from_pretrained(f"{AE_HF_NAME}", torch_dtype=torch.bfloat16, cache_dir=f"{MODELS_DIR_BASE}/{AE_HF_NAME}").to(device)
+    ae = AutoencoderDC.from_pretrained(f"mit-han-lab/{AE_HF_NAME}", torch_dtype=torch.bfloat16, cache_dir=f"{MODELS_DIR_BASE}/{AE_HF_NAME}").to(device)
     ae = ImageEmbedder(ae)
 
     siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device)
@@ -338,11 +365,15 @@ def process_parquets(rank, world_size, queue, process_progress, total_files, tot
             batch = df.slice(batch_start, BS)
             
             # Resize images
-            images = [bytes_to_pil_image(img.as_py()) for img in batch[IMAGE_COLUMN_NAME]]
+            # images = [bytes_to_pil_image(img.as_py()) for img in batch[IMAGE_COLUMN_NAME]]
+            # resized_images = [resize_and_crop(img, new_resolution) for img in images]
+            # image_tensors = torch.stack([preprocess_image(img) for img in resized_images]).to(device)
+
+            image_tensors = process_images_threaded(batch, IMAGE_COLUMN_NAME, new_resolution)
+            image_tensors = image_tensors.to(device)
+
             captions = [captions_json[batch[IMAGE_ID_COLUMN_NAME][i].as_py()] for i in range(len(batch))]
-            resized_images = [resize_and_crop(img, new_resolution) for img in images]
-            image_tensors = torch.stack([preprocess_image(img) for img in resized_images]).to(device)
-            
+
             # Generate VAE latents
             latents = ae.generate(image_tensors)
             
