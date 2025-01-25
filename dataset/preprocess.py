@@ -17,8 +17,8 @@ import io
 import concurrent.futures
 
 DATASET = "commoncatalog-cc-by"
-DATASET_DIR_BASE = "../datasets"
-MODELS_DIR_BASE = "../models"
+DATASET_DIR_BASE = "./datasets"
+MODELS_DIR_BASE = "./models"
 AE_HF_NAME = "dc-ae-f32c32-mix-1.0-diffusers"
 SIGLIP_HF_NAME = "google/siglip-so400m-patch14-384"
 BERT_HF_NAME = "answerdotai/ModernBERT-large"
@@ -35,7 +35,7 @@ def get_prng(seed):
     return np.random.RandomState(seed)
 
 class BucketManager:
-    def __init__(self, max_size=(512,512), divisible=32, min_dim=256, base_res=(512,612), bsz=64, world_size=1, global_rank=0, max_ar_error=4, seed=42, dim_limit=1024, debug=False):
+    def __init__(self, max_size=(512,512), divisible=32, min_dim=256, base_res=(512,512), bsz=64, world_size=1, global_rank=0, max_ar_error=4, seed=42, dim_limit=1024, debug=False):
         self.max_size = max_size
         self.f = 8
         self.max_tokens = (max_size[0]/self.f) * (max_size[1]/self.f)
