@@ -1,11 +1,11 @@
 from copy import deepcopy
 import torch
+from dataset.shapebatching_dataset import ShapeBatchingDataset
 from transformer.reimei import ReiMei, ReiMeiParameters
 from accelerate import Accelerator
 from config import BS, EPOCHS, MASK_RATIO, AE_SCALING_FACTOR, AE_CHANNELS, AE_HF_NAME, MODELS_DIR_BASE, DS_DIR_BASE, SEED, USERNAME, DATASET_NAME, LR
 from config import DIT_S as DIT
 from datasets import load_dataset
-# from dataset.shapebatching_dataset import ShapeBatchingDataset
 from transformer.utils import random_mask, apply_mask_to_tensor
 from tqdm import tqdm
 import datasets
@@ -20,10 +20,10 @@ from torch.optim.lr_scheduler import OneCycleLR
 
 DTYPE = torch.bfloat16
 
-def sample_images(model, vae, noise, embeddings):
+def sample_images(model, vae, noise, sig_emb, sig_vec, bert_emb, bert_vec):
     with torch.no_grad():
         # Use the stored embeddings
-        sampled_latents = sample(model, noise, embeddings.unsqueeze(1), embeddings, sample_steps=50)
+        sampled_latents = model.sample(noise, sig_emb, sig_vec, bert_emb, bert_vec, sample_steps=50)
         
         # Decode latents to images
         sampled_images = vae.decode(sampled_latents).sample
@@ -32,10 +32,10 @@ def sample_images(model, vae, noise, embeddings):
     grid = torchvision.utils.make_grid(sampled_images, nrow=3, normalize=True, scale_each=True)
     return grid
 
-# def get_dataset(bs, seed, num_workers=16):
-#     dataset = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", split="train").to_iterable_dataset(1000).shuffle(seed, buffer_size = bs * 20)
-#     dataset = ShapeBatchingDataset(dataset, bs, True, seed)
-#     return dataset
+def get_dataset(bs, seed, num_workers=16):
+    dataset = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", split="train").to_iterable_dataset(1000).shuffle(seed, buffer_size = bs * 20)
+    dataset = ShapeBatchingDataset(dataset, bs, True, seed)
+    return dataset
 
 class MemmapDataset(Dataset):
     def __init__(self, data_path):
@@ -51,27 +51,6 @@ class MemmapDataset(Dataset):
         sample = self.data[index]
         
         return sample
-
-@torch.no_grad()
-def sample(model, z, cond, vec, null_cond=None, sample_steps=2, cfg=2.0):
-    b = z.size(0)
-    dt = 1.0 / sample_steps
-    dt = torch.tensor([dt] * b).to(z.device, DTYPE).view([b, *([1] * len(z.shape[1:]))])
-    images = [z]
-
-    for i in range(sample_steps, 0, -1):
-        t = i / sample_steps
-        t = torch.tensor([t] * b).to(z.device, DTYPE)
-
-        vc = model(z, t, cond, vec, None).to(DTYPE)
-        # if null_cond is not None:
-        #     vu = model(z, t, null_cond)
-        #     vc = vu + cfg * (vc - vu)
-
-        z = z - dt * vc
-        images.append(z)
-
-    return (images[-1] / AE_SCALING_FACTOR)
 
 def batch_to_tensors(batch):
     latents = batch["latent"]
@@ -140,17 +119,15 @@ if __name__ == "__main__":
 
     print("Starting training...")
     
-    # dataset = get_dataset(BS, SEED + accelerator.process_index, num_workers=64)
-    # dataset = load_dataset(f"{USERNAME}/{DATASET_NAME}", split="train", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}")
-    dataset = MemmapDataset(f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth")
-    dataset = DataLoader(dataset, batch_size=BS, shuffle=True, num_workers=0)
+    dataset = get_dataset(BS, SEED + accelerator.process_index, num_workers=64)
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
 
     scheduler = OneCycleLR(optimizer, max_lr=LR, steps_per_epoch=len(dataset), epochs=EPOCHS)
 
     model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, dataset)
 
-    # checkpoint = torch.load(f"models/microdit_model_and_optimizer_epoch_0_f32.pt")
+    # checkpoint = torch.load(f"models/reimei_model_and_optimizer_epoch_0_f32.pt")
     # model.load_state_dict(checkpoint['model_state_dict'])
     # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
@@ -162,30 +139,28 @@ if __name__ == "__main__":
         
         os.makedirs("logs", exist_ok=True)
 
-        noise = torch.randn(9, AE_CHANNELS, 8, 8).to(device, dtype=DTYPE)
+        noise = torch.randn(9, AE_CHANNELS, 16, 16).to(device, dtype=DTYPE)
         example_batch = next(iter(dataset))
-        # example_embeddings = example_batch["text_embedding"][:9].to(device)
-        # example_captions = example_batch["caption"][:9]
-        # example_latents = batch_to_tensors(example_batch)[:9].to(device, dtype=DTYPE)
-        example_latents = example_batch.to(device, dtype=DTYPE)[:9]
+        ex_sig_emb = example_batch["siglip_emb"][:9].to(device, dtype=DTYPE)
+        ex_sig_vec = example_batch["siglip_vec"][:9].to(device, dtype=DTYPE)
+        ex_bert_emb = example_batch["bert_emb"][:9].to(device, dtype=DTYPE)
+        ex_bert_vec = example_batch["bert_vec"][:9].to(device, dtype=DTYPE)
+        example_latents = example_batch["ae_latent"][:9].to(device, dtype=DTYPE)
+        example_captions = example_batch["caption"][:9]
+
         with torch.no_grad():
             example_ground_truth = dc_ae.decode(example_latents).sample
         grid = torchvision.utils.make_grid(example_ground_truth, nrow=3, normalize=True, scale_each=True)
         torchvision.utils.save_image(grid, f"logs/example_images.png")
 
         # Save captions
-        # with open("logs/example_captions.txt", "w") as f:
-        #     for index, caption in enumerate(example_captions):
-        #         f.write(f"{index}: {caption}\n")
+        with open("logs/example_captions.txt", "w") as f:
+            for index, caption in enumerate(example_captions):
+                f.write(f"{index}: {caption}\n")
         dc_ae = dc_ae.to("cpu")
         losses = []
 
-        del example_batch
-        # del example_embeddings
-        # del example_captions
-        del example_latents
-        del example_ground_truth
-        del grid
+        del example_batch, ex_sig_emb, ex_sig_vec, ex_bert_emb, ex_bert_vec, example_captions, example_latents, example_ground_truth, grid
 
     ema_model = deepcopy(model)
     ema_decay = 0.999
@@ -194,14 +169,13 @@ if __name__ == "__main__":
         progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch}", leave=False)
         for batch_idx, batch in enumerate(progress_bar):
             # latents = batch_to_tensors(batch).to(device, DTYPE)
-            latents = batch.to(device, dtype=DTYPE)
+            latents = batch["ae_latent"].to(device, dtype=DTYPE)
+            siglip_emb = batch["siglip_emb"].to(device, dtype=DTYPE)
+            siglip_vec = batch["siglip_vec"].to(device, dtype=DTYPE)
+            bert_emb = batch["bert_emb"].to(device, dtype=DTYPE)
+            bert_vec = batch["bert_vec"].to(device, dtype=DTYPE)
 
-            # caption_embeddings = batch["text_embedding"].to(device)
             bs, c, h, w = latents.shape
-
-            # Null caption embeddings for this dataset
-            caption_embeddings = torch.zeros((bs, cond_embed_dim), device=device, dtype=DTYPE)
-
             latents = latents * AE_SCALING_FACTOR
 
             mask = random_mask(bs, latents.shape[-2], latents.shape[-1], mask_ratio=MASK_RATIO).to(device, dtype=DTYPE)
@@ -213,7 +187,7 @@ if __name__ == "__main__":
             z1 = torch.randn_like(latents, device=device, dtype=DTYPE)
             zt = (1 - texp) * latents + texp * z1
 
-            vtheta = model(zt, t, caption_embeddings.unsqueeze(1), caption_embeddings, mask)
+            vtheta = model(zt, t, siglip_emb, siglip_vec, bert_emb, bert_vec, mask)
             sample_theta = z1 - vtheta
 
             latents = apply_mask_to_tensor(latents, mask)
@@ -237,7 +211,7 @@ if __name__ == "__main__":
                     model.eval()
                     dc_ae = dc_ae.to(device)
 
-                    grid = sample_images(model, dc_ae, noise, torch.zeros((9, cond_embed_dim), device=device, dtype=DTYPE))
+                    grid = sample_images(model, dc_ae, noise, ex_sig_emb, ex_sig_vec, ex_bert_emb, ex_bert_vec)
                     torchvision.utils.save_image(grid, f"logs/sampled_images_epoch_{epoch}_batch_{batch_idx}.png")
 
                     del grid
@@ -251,7 +225,7 @@ if __name__ == "__main__":
         if accelerator.is_main_process and epoch % 10 == 0:
             unwrapped_model = accelerator.unwrap_model(model)
             unwrapped_optimizer = accelerator.unwrap_model(optimizer)
-            model_save_path = f"models/microdit_model_and_optimizer_epoch_{epoch}_f32.pt"
+            model_save_path = f"models/reimei_model_and_optimizer_epoch_{epoch}_f32.pt"
             torch.save({
                 'model_state_dict': unwrapped_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
@@ -270,7 +244,7 @@ if __name__ == "__main__":
 
         unwrapped_model = accelerator.unwrap_model(model)
         unwrapped_optimizer = accelerator.unwrap_model(optimizer)
-        model_save_path = "models/pretrained_microdit_model_and_optimizer.pt"
+        model_save_path = "models/pretrained_reimei_model_and_optimizer.pt"
         torch.save(
             {
                 'model_state_dict': unwrapped_model.state_dict(),

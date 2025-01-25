@@ -194,7 +194,7 @@ class ReiMei(nn.Module):
         return img
     
     @torch.no_grad()
-    def sample(model, z, sig_txt, sig_vec, bert_txt, bert_vec, null_cond=None, sample_steps=2, cfg=2.0):
+    def sample(self, z, sig_emb, sig_vec, bert_emb, bert_vec, sample_steps=50, cfg=3.0):
         b = z.size(0)
         dt = 1.0 / sample_steps
         dt = torch.tensor([dt] * b).to(z.device, torch.bfloat16).view([b, *([1] * len(z.shape[1:]))])
@@ -204,10 +204,14 @@ class ReiMei(nn.Module):
             t = i / sample_steps
             t = torch.tensor([t] * b).to(z.device, torch.bfloat16)
 
-            vc = model(z, t, sig_txt, sig_vec, bert_txt, bert_vec, None).to(torch.bfloat16)
-            # if null_cond is not None:
-            #     vu = model(z, t, null_cond)
-            #     vc = vu + cfg * (vc - vu)
+            vc = self(z, t, sig_emb, sig_vec, bert_emb, bert_vec, None).to(torch.bfloat16)
+            if cfg != 1.0:
+                null_sig_emb = torch.zeros_like(sig_emb)
+                null_sig_vec = torch.zeros_like(sig_vec)
+                null_bert_emb = torch.zeros_like(bert_emb)
+                null_bert_vec = torch.zeros_like(bert_vec)
+                vu = self(z, t, null_sig_emb, null_sig_vec, null_bert_emb, null_bert_vec, None)
+                vc = vu + cfg * (vc - vu)
 
             z = z - dt * vc
             images.append(z)

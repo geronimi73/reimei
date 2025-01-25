@@ -18,7 +18,7 @@ class ShapeBatchingDataset(IterableDataset):
         shape_batches = defaultdict(list)
         for sample in self.dataset:
             # Get the shape as a tuple to use as a key
-            shape_key = tuple(sample['vae_latent_shape'])
+            shape_key = tuple(sample['ae_latent_shape'])
             shape_batches[shape_key].append(sample) 
 
             # If enough samples are accumulated for this shape, yield a batch
@@ -35,13 +35,23 @@ class ShapeBatchingDataset(IterableDataset):
 
     def prepare_batch(self, samples):
         # Convert lists of samples into tensors
-        vae_latent_shape = tuple(samples[0]['vae_latent_shape'])
+        ae_latent_shape = tuple(samples[0]['ae_latent_shape'])
+
+        siglip_emb = torch.tensor(np.stack([np.frombuffer(s['siglip_emb'], dtype=np.float16).copy() for s in samples]))
+        siglip_vec = torch.tensor(np.stack([np.frombuffer(s['siglip_vec'], dtype=np.float16).copy() for s in samples]))
+        siglip_max_unpadded = torch.stack([s["siglip_unpadded_len"] for s in samples]).max()
+        bert_emb = torch.tensor(np.stack([np.frombuffer(s['bert_emb'], dtype=np.float16).copy() for s in samples]))
+        bert_vec = torch.tensor(np.stack([np.frombuffer(s['bert_vec'], dtype=np.float16).copy() for s in samples]))
+        bert_max_unpadded = torch.stack([s["bert_unpadded_len"] for s in samples]).max()
 
         batch = {
             'caption': [s['caption'] for s in samples],
-            'vae_latent': torch.tensor(np.stack([np.frombuffer(s['vae_latent'], dtype=np.float32).copy() for s in samples])).reshape(-1, *vae_latent_shape),
-            'vae_latent_shape': vae_latent_shape,
-            'text_embedding': torch.tensor(np.stack([np.frombuffer(s['text_embedding'], dtype=np.float16).copy() for s in samples])),
+            'ae_latent': torch.tensor(np.stack([np.frombuffer(s['ae_latent'], dtype=np.float16).copy() for s in samples])).reshape(-1, *ae_latent_shape),
+            'ae_latent_shape': ae_latent_shape,
+            'siglip_emb': siglip_emb[:, :siglip_max_unpadded, :],
+            'siglip_vec': siglip_vec,
+            'bert_emb': bert_emb[:, :bert_max_unpadded, :],
+            'bert_vec': bert_vec,
         }
         return batch
     
