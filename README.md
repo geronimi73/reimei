@@ -1,8 +1,6 @@
-# 黎明
+黎明 (reimei/límíng)
+Meanings
 
-## Meanings
-
-**Noun**
-
-1. **Daybreak; Dawn**
-2. **Dawn (of a new age)**
+Noun
+1. daybreak; dawn;
+2. dawn (of a new age)
