@@ -200,7 +200,7 @@ class ReiMei(nn.Module):
         dt = torch.tensor([dt] * b).to(z.device, torch.bfloat16).view([b, *([1] * len(z.shape[1:]))])
         images = [z]
 
-        for i in range(sample_steps, 0, -1):
+        for i in range(sample_steps):
             t = i / sample_steps
             t = torch.tensor([t] * b).to(z.device, torch.bfloat16)
 
@@ -213,7 +213,7 @@ class ReiMei(nn.Module):
                 vu = self(z, t, null_sig_emb, null_sig_vec, null_bert_emb, null_bert_vec, None)
                 vc = vu + cfg * (vc - vu)
 
-            z = z - dt * vc
+            z = z + dt * vc
             images.append(z)
 
         return (images[-1] / AE_SCALING_FACTOR)

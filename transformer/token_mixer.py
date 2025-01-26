@@ -22,7 +22,8 @@ class TokenMixer(nn.Module):
         num_experts: int = 8,
         num_experts_per_tok: int = 2,
         pretraining_tp: int = 2,
-        num_shared_experts: int = 2
+        num_shared_experts: int = 2,
+        exp_ratio: int = 4
     ):
         super().__init__()
         self.layers = nn.ModuleList([
@@ -33,7 +34,8 @@ class TokenMixer(nn.Module):
                 num_experts=num_experts,
                 num_experts_per_tok=num_experts_per_tok,
                 pretraining_tp=pretraining_tp,
-                num_shared_experts=num_shared_experts
+                num_shared_experts=num_shared_experts,
+                exp_ratio=exp_ratio
             )
             for _ in range(num_layers)
         ])

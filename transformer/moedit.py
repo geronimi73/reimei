@@ -203,7 +203,7 @@ class EC_DiTMoEGate(nn.Module):
       C = (S * f_c) / E,
     computed in the forward pass.
     """
-    def __init__(self, embed_dim, num_experts=16, f_c=0.2):
+    def __init__(self, embed_dim, num_experts=16, f_c=2.0):
         super().__init__()
         self.num_experts = num_experts
         self.f_c = f_c  # capacity factor

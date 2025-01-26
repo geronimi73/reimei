@@ -44,7 +44,7 @@ class TransformerBackbone(nn.Module):
             if i % 2 == 0:  # Even layers use regular DiT (no MoE)
                 n_exp = 1
                 n_shared = 1
-                n_act = 1
+                n_act = 1.0
             else:  # Odd layers use MoE DiT
                 n_exp = params.num_experts
                 n_shared = params.shared_experts
