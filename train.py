@@ -36,7 +36,7 @@ def sample_images(model, vae, noise, sig_emb, sig_vec, bert_emb, bert_vec):
     return grid
 
 def get_dataset(bs, seed, num_workers=16):
-    dataset = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", split="train").to_iterable_dataset(1000).shuffle(seed, buffer_size = bs * 20)
+    dataset = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}",num_proc=num_workers, split="train").to_iterable_dataset(1000).shuffle(seed, buffer_size = bs * 20)
     dataset = ShapeBatchingDataset(dataset, bs, True, seed)
     return dataset
 
