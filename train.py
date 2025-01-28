@@ -23,12 +23,15 @@ DTYPE = torch.bfloat16
 def sample_images(model, vae, noise, sig_emb, sig_vec, bert_emb, bert_vec):
     with torch.no_grad():
         # Use the stored embeddings
+        # two_step_latents = model.sample(noise, sig_emb, sig_vec, bert_emb, bert_vec, sample_steps=1).to(device, dtype=DTYPE)
         sampled_latents = model.sample(noise, sig_emb, sig_vec, bert_emb, bert_vec, sample_steps=50).to(device, dtype=DTYPE)
         
         # Decode latents to images
+        # two_step_images = vae.decode(two_step_latents).sample
         sampled_images = vae.decode(sampled_latents).sample
 
     # Log the sampled images
+    # interleaved = torch.stack([two_step_images, sampled_images], dim=1).view(-1, *two_step_images.shape[1:])
     grid = torchvision.utils.make_grid(sampled_images, nrow=3, normalize=True, scale_each=True)
     return grid
 
@@ -71,41 +74,17 @@ if __name__ == "__main__":
     # Comment this out if you havent downloaded dataset and models yet
     datasets.config.HF_HUB_OFFLINE = 1
 
-    # base_dim = 1024
-    # base_heads = 16
-
-    # input_dim = AE_CHANNELS
-    # embed_dim = 1024
-    # num_layers = 28
-    # num_heads = 16
-    # mlp_dim = embed_dim
-    # cond_embed_dim = 1 # Null for this dataset
-    # # pos_embed_dim = 60
-    # pos_embed_dim = None
-    # num_experts = 32
-    # image_text_expert_ratio = 8
-    # active_experts = 2.0
-    # shared_experts = None
-    # token_mixer_layers = 1
-    # dropout = 0.1
-
-        
     input_dim = AE_CHANNELS
-    num_layers = 4
+    num_layers = 24
     embed_dim = 1152
-    num_heads = embed_dim // 64
+    num_heads = embed_dim // 32
     mlp_dim = embed_dim
-    num_experts = 1
-    active_experts = 1.0
-    shared_experts = None
+    num_experts = 64
+    active_experts = 2.0
+    shared_experts = 1
     token_mixer_layers = 2
-    image_text_expert_ratio = 1
+    image_text_expert_ratio = 16
     dropout = 0.1
-
-
-    # m_d = float(embed_dim) / float(base_dim)
-
-    # assert (embed_dim // num_heads) == (base_dim // base_heads)
 
     params = ReiMeiParameters(
         channels=input_dim,
@@ -132,9 +111,9 @@ if __name__ == "__main__":
 
     print("Starting training...")
     
-    # dataset = get_dataset(BS, SEED + accelerator.process_index, num_workers=64)
-    dataset = MemmapDataset(f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth")
-    dataset = DataLoader(dataset, batch_size=BS, shuffle=True, num_workers=0)
+    dataset = get_dataset(BS, SEED + accelerator.process_index, num_workers=64)
+    # dataset = MemmapDataset(f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth")
+    # dataset = DataLoader(dataset, batch_size=BS, shuffle=True, num_workers=0)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.1)
 
@@ -156,17 +135,17 @@ if __name__ == "__main__":
 
         noise = torch.randn(9, AE_CHANNELS, 8, 8).to(device, dtype=DTYPE)
         example_batch = next(iter(dataset))
-        # ex_sig_emb = example_batch["siglip_emb"][:9].to(device, dtype=DTYPE)
-        # ex_sig_vec = example_batch["siglip_vec"][:9].to(device, dtype=DTYPE)
-        # ex_bert_emb = example_batch["bert_emb"][:9].to(device, dtype=DTYPE)
-        # ex_bert_vec = example_batch["bert_vec"][:9].to(device, dtype=DTYPE)
-        # example_latents = example_batch["ae_latent"][:9].to(device, dtype=DTYPE)
-        # example_captions = example_batch["caption"][:9]
-        ex_sig_emb = torch.zeros(9, 64, 1152).to(device, dtype=DTYPE)
-        ex_sig_vec = torch.zeros(9, 1152).to(device, dtype=DTYPE)
-        ex_bert_emb = torch.zeros(9, 64, 1024).to(device, dtype=DTYPE)
-        ex_bert_vec = torch.zeros(9, 1024).to(device, dtype=DTYPE)
-        example_latents = example_batch.to(device, dtype=DTYPE)[:9]
+        ex_sig_emb = example_batch["siglip_emb"][:9].to(device, dtype=DTYPE)
+        ex_sig_vec = example_batch["siglip_vec"][:9].to(device, dtype=DTYPE)
+        ex_bert_emb = example_batch["bert_emb"][:9].to(device, dtype=DTYPE)
+        ex_bert_vec = example_batch["bert_vec"][:9].to(device, dtype=DTYPE)
+        example_latents = example_batch["ae_latent"][:9].to(device, dtype=DTYPE)
+        example_captions = example_batch["caption"][:9]
+        # ex_sig_emb = torch.zeros(9, 64, 1152).to(device, dtype=DTYPE)
+        # ex_sig_vec = torch.zeros(9, 1152).to(device, dtype=DTYPE)
+        # ex_bert_emb = torch.zeros(9, 64, 1024).to(device, dtype=DTYPE)
+        # ex_bert_vec = torch.zeros(9, 1024).to(device, dtype=DTYPE)
+        # example_latents = example_batch.to(device, dtype=DTYPE)[:9]
         
         with torch.no_grad():
             example_ground_truth = dc_ae.decode(example_latents).sample
@@ -174,14 +153,14 @@ if __name__ == "__main__":
         torchvision.utils.save_image(grid, f"logs/example_images.png")
 
         # Save captions
-        # with open("logs/example_captions.txt", "w") as f:
-        #     for index, caption in enumerate(example_captions):
-        #         f.write(f"{index}: {caption}\n")
+        with open("logs/example_captions.txt", "w") as f:
+            for index, caption in enumerate(example_captions):
+                f.write(f"{index}: {caption}\n")
         dc_ae = dc_ae.to("cpu")
         losses = []
 
-        # del example_batch, ex_sig_emb, ex_sig_vec, ex_bert_emb, ex_bert_vec, example_captions, example_latents, example_ground_truth, grid
-        del example_batch, example_latents, example_ground_truth, grid
+        del example_batch, ex_sig_emb, ex_sig_vec, ex_bert_emb, ex_bert_vec, example_captions, example_latents, example_ground_truth, grid
+        # del example_batch, example_latents, example_ground_truth, grid
 
 
     ema_decay = 0.999
@@ -190,21 +169,21 @@ if __name__ == "__main__":
         progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch}", leave=False)
         for batch_idx, batch in enumerate(progress_bar):
             # latents = batch_to_tensors(batch).to(device, DTYPE)
-            # latents = batch["ae_latent"].to(device, dtype=DTYPE)
-            # siglip_emb = batch["siglip_emb"].to(device, dtype=DTYPE)
-            # siglip_vec = batch["siglip_vec"].to(device, dtype=DTYPE)
-            # bert_emb = batch["bert_emb"].to(device, dtype=DTYPE)
-            # bert_vec = batch["bert_vec"].to(device, dtype=DTYPE)
+            latents = batch["ae_latent"].to(device, dtype=DTYPE)
+            siglip_emb = batch["siglip_emb"].to(device, dtype=DTYPE)
+            siglip_vec = batch["siglip_vec"].to(device, dtype=DTYPE)
+            bert_emb = batch["bert_emb"].to(device, dtype=DTYPE)
+            bert_vec = batch["bert_vec"].to(device, dtype=DTYPE)
 
             latents = batch.to(device, dtype=DTYPE)
 
             bs, c, h, w = latents.shape
             latents = latents * AE_SCALING_FACTOR
 
-            siglip_emb = torch.zeros(bs, 64, 1152).to(device, dtype=DTYPE)
-            siglip_vec = torch.zeros(bs, 1152).to(device, dtype=DTYPE)
-            bert_emb = torch.zeros(bs, 64, 1024).to(device, dtype=DTYPE)
-            bert_vec = torch.zeros(bs, 1024).to(device, dtype=DTYPE)
+            # siglip_emb = torch.zeros(bs, 64, 1152).to(device, dtype=DTYPE)
+            # siglip_vec = torch.zeros(bs, 1152).to(device, dtype=DTYPE)
+            # bert_emb = torch.zeros(bs, 64, 1024).to(device, dtype=DTYPE)
+            # bert_vec = torch.zeros(bs, 1024).to(device, dtype=DTYPE)
 
             mask = random_mask(bs, latents.shape[-2], latents.shape[-1], mask_ratio=MASK_RATIO).to(device, dtype=DTYPE)
 
@@ -216,7 +195,7 @@ if __name__ == "__main__":
     
             t = torch.rand((bs,), device=device, dtype=DTYPE)
             texp = t.view([bs, 1, 1, 1]).to(device, dtype=DTYPE)
-            
+
             z = torch.randn_like(latents, device=device, dtype=DTYPE)
             x_t = (texp * latents) + ((1 - texp) * z)
 
@@ -229,7 +208,6 @@ if __name__ == "__main__":
             v = latents - z
 
             mse = ((vtheta - v) ** 2).mean()
-
             loss = mse * 1 / (1 - MASK_RATIO)
 
             optimizer.zero_grad()
