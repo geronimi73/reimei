@@ -1,11 +1,11 @@
 USERNAME = "SwayStar123"
-DATASET_NAME = "preprocessed_commoncatalog-cc-by_DCAE"
+DATASET_NAME = "pruned_preprocessed_commoncatalog-cc-by_DCAE"
 DS_DIR_BASE = "../../datasets"
 MODELS_DIR_BASE = "../../models"
-AE_SCALING_FACTOR = 0.3189
+AE_SCALING_FACTOR = 0.4552
 
-BS = 32
-EPOCHS = 50
+BS = 9
+TRAIN_STEPS = 10000
 MASK_RATIO = 0.75
 CFG_RATIO = 0.02
 SEED = 42

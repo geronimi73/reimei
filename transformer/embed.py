@@ -144,7 +144,7 @@ class TimestepEmbedder(nn.Module):
         if dim % 2:
             embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
         # if inference with fp16, embedding.half()
-        return embedding 
+        return embedding.to(t.dtype)
 
     def forward(self, t):
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size) 

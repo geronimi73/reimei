@@ -166,7 +166,7 @@ class ReiMei(nn.Module):
 
         # (height, width, embed_dim)
         sincos_pos_embed = sincos_2d(self.embed_dim, height, width)
-        sincos_pos_embed = sincos_pos_embed.to(img.device).unsqueeze(0).expand(batch_size, -1, -1)
+        sincos_pos_embed = sincos_pos_embed.to(device=img.device, dtype=img.dtype).unsqueeze(0).expand(batch_size, -1, -1)
         
         img = img + sincos_pos_embed
 

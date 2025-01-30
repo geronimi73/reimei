@@ -203,7 +203,7 @@ if __name__ == "__main__":
             shared_experts=1,
             dropout=dropout,
             token_mixer_layers=2,
-            image_text_expert_ratio=16,
+            image_text_expert_ratio=nx//4,
         )
         model = ReiMei(params).to(DTYPE)
 
