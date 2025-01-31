@@ -2,9 +2,21 @@ import torch
 from torch.utils.data import IterableDataset
 from collections import defaultdict
 import numpy as np
+from torch.utils.data import DataLoader
+
+def custom_collate(batch):
+    captions = [item['caption'] for item in batch]
+    ae_latents = [item['ae_latent'] for item in batch]
+    ae_latent_shapes = [item['ae_latent_shape'] for item in batch]
+
+    return {
+        'caption': captions,
+        'ae_latent': ae_latents,
+        'ae_latent_shape': ae_latent_shapes
+    }
 
 class ShapeBatchingDataset(IterableDataset):
-    def __init__(self, hf_dataset, batch_size, siglip_tokenizer, siglip_model, bert_tokenizer, bert_model, device, shuffle=True, seed=42, buffer_multiplier=20, ):
+    def __init__(self, hf_dataset, batch_size, siglip_tokenizer, siglip_model, bert_tokenizer, bert_model, device, num_workers, shuffle=True, seed=42, buffer_multiplier=20, ):
         self.dataset = hf_dataset
         self.batch_size = batch_size
         self.shuffle = shuffle
@@ -15,14 +27,16 @@ class ShapeBatchingDataset(IterableDataset):
         self.bert_tokenizer = bert_tokenizer
         self.bert_model = bert_model
         self.device = device
+        self.num_workers = num_workers
 
     def __iter__(self):
         while True:
             if self.shuffle:
                 self.dataset = self.dataset.shuffle(seed=self.seed, buffer_size=self.batch_size*self.buffer_multiplier)
+                self.dataloader = DataLoader(self.dataset, self.batch_size, num_workers=self.num_workers, collate_fn=custom_collate)
             
             shape_batches = defaultdict(lambda: {'caption': [], 'ae_latent': []})
-            for batch in self.dataset:
+            for batch in self.dataloader:
                 caption = batch['caption']
                 ae_latent = batch['ae_latent']
                 ae_latent_shape = batch['ae_latent_shape']
@@ -39,7 +53,7 @@ class ShapeBatchingDataset(IterableDataset):
                         shape_batches[shape_key]['caption'] = []
                         shape_batches[shape_key]['ae_latent'] = []
 
-    def prepare_batch(self, samples, latent_shape):
+    def prepare_batch(self, samples, latent_shape):# -> dict[str, Any]:
         # Convert lists of samples into tensors
         ae_latent = torch.tensor(np.stack([np.array(s, dtype=np.float16).copy() for s in samples['ae_latent']])).reshape(-1, *latent_shape)
         # ae_latent = torch.stack([s['ae_latent'].reshape(*ae_latent_shape) for s in samples])

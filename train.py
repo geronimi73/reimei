@@ -38,13 +38,13 @@ def sample_images(model, vae, noise, sig_emb, sig_vec, bert_emb, bert_vec):
 
 def get_dataset(bs, seed, device, num_workers=16):
     ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}",num_proc=num_workers, split="train")
-    ds = ds.to_iterable_dataset(1000).batch(bs*2)
+    ds = ds.to_iterable_dataset(1000)
     siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device)
     siglip_tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
     bert_model = ModernBertModel.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert").to(device)
     bert_tokenizer = AutoTokenizer.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert")
     
-    ds = ShapeBatchingDataset(ds, bs, siglip_tokenizer, siglip_model, bert_tokenizer, bert_model, device, shuffle=True, seed=seed)
+    ds = ShapeBatchingDataset(ds, bs, siglip_tokenizer, siglip_model, bert_tokenizer, bert_model, device, num_workers, shuffle=True, seed=seed)
     return ds
 
 # class MemmapDataset(Dataset):

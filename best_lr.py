@@ -10,12 +10,15 @@ import os
 # From your code/config
 from config import (
     BERT_EMBED_DIM,
+    BERT_HF_NAME,
+    MODELS_DIR_BASE,
     SIGLIP_EMBED_DIM,
     BS,
     SEED,
     AE_SCALING_FACTOR,
     AE_CHANNELS,
     DS_DIR_BASE,
+    SIGLIP_HF_NAME,
     USERNAME,
     DATASET_NAME,
     MASK_RATIO,
@@ -24,21 +27,20 @@ from datasets import load_dataset
 from dataset.shapebatching_dataset import ShapeBatchingDataset
 from transformer.reimei import ReiMei, ReiMeiParameters
 from transformer.utils import random_mask, apply_mask_to_tensor
+from transformers import SiglipTokenizer, SiglipTextModel, AutoTokenizer, ModernBertModel
 
 DTYPE = torch.bfloat16
 
-def get_dataset(bs, seed, num_workers=16):
-    """
-    Same dataset-loading logic as in your training script.
-    """
-    dataset = load_dataset(
-        f"{USERNAME}/{DATASET_NAME}",
-        cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}",
-        split="train",
-        num_proc=num_workers
-    ).to_iterable_dataset(1000).shuffle(seed, buffer_size=bs * 20)
-    dataset = ShapeBatchingDataset(dataset, bs, True, seed)
-    return dataset
+def get_dataset(bs, seed, device, num_workers=16):
+    ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}",num_proc=num_workers, split="train")
+    ds = ds.to_iterable_dataset(1000)
+    siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device)
+    siglip_tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
+    bert_model = ModernBertModel.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert").to(device)
+    bert_tokenizer = AutoTokenizer.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert")
+    
+    ds = ShapeBatchingDataset(ds, bs, siglip_tokenizer, siglip_model, bert_tokenizer, bert_model, device, num_workers, shuffle=True, seed=seed)
+    return ds
 
 def lr_range_test(
     accelerator,
@@ -174,7 +176,7 @@ if __name__ == "__main__":
     experts_list = [8, 16, 32, 64]
 
     # Build dataset / dataloader
-    dataset = get_dataset(BS, SEED + accelerator.process_index, num_workers=32)
+    dataset = get_dataset(BS, SEED + accelerator.process_index, device, num_workers=8)
     # Just pass dataset along; we'll wrap it with accelerator in lr_range_test
     train_dataloader = dataset
 
