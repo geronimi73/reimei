@@ -82,13 +82,13 @@ if __name__ == "__main__":
     datasets.config.HF_HUB_OFFLINE = 1
 
     input_dim = AE_CHANNELS
-    num_layers = 4
+    num_layers = 24
     embed_dim = 1152
     num_heads = embed_dim // 32
     mlp_dim = embed_dim
-    num_experts = 2
-    active_experts = 1.0
-    shared_experts = None
+    num_experts = 64
+    active_experts = 2.0
+    shared_experts = 1
     token_mixer_layers = 2
     image_text_expert_ratio = 1
     dropout = 0.1
