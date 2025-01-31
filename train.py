@@ -33,7 +33,7 @@ def sample_images(model, vae, noise, sig_emb, sig_vec, bert_emb, bert_vec):
 
     # Log the sampled images
     # interleaved = torch.stack([two_step_images, sampled_images], dim=1).view(-1, *two_step_images.shape[1:])
-    grid = torchvision.utils.make_grid(sampled_images, nrow=3, normalize=True, scale_each=True)
+    grid = torchvision.utils.make_grid(sampled_images, nrow=3)
     return grid
 
 def get_dataset(bs, seed, device, num_workers=16):
@@ -90,7 +90,7 @@ if __name__ == "__main__":
     active_experts = 2.0
     shared_experts = 1
     token_mixer_layers = 2
-    image_text_expert_ratio = 1
+    image_text_expert_ratio = 16
     dropout = 0.1
 
     params = ReiMeiParameters(
@@ -118,7 +118,7 @@ if __name__ == "__main__":
 
     print("Starting training...")
     
-    dataset = get_dataset(BS, SEED + accelerator.process_index, device=device, num_workers=64)
+    dataset = get_dataset(BS, SEED + accelerator.process_index, device=device, num_workers=1)
     # dataset = MemmapDataset(f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth")
     # dataset = DataLoader(dataset, batch_size=BS, shuffle=True, num_workers=0)
 
