@@ -24,16 +24,16 @@ DTYPE = torch.bfloat16
 def sample_images(model, vae, noise, sig_emb, sig_vec, bert_emb, bert_vec):
     with torch.no_grad():
         # Use the stored embeddings
-        # two_step_latents = model.sample(noise, sig_emb, sig_vec, bert_emb, bert_vec, sample_steps=1).to(device, dtype=DTYPE)
-        sampled_latents = model.sample(noise, sig_emb, sig_vec, bert_emb, bert_vec, sample_steps=50).to(device, dtype=DTYPE)
+        sampled_latents = model.sample(noise, sig_emb, sig_vec, bert_emb, bert_vec, sample_steps=50, cfg=1.0).to(device, dtype=DTYPE)
+        cfg_sampled_latents = model.sample(noise, sig_emb, sig_vec, bert_emb, bert_vec, sample_steps=50, cfg=3.0).to(device, dtype=DTYPE)
         
         # Decode latents to images
-        # two_step_images = vae.decode(two_step_latents).sample
         sampled_images = vae.decode(sampled_latents).sample
+        cfg_sampled_images = vae.decode(cfg_sampled_latents).sample
 
     # Log the sampled images
-    # interleaved = torch.stack([two_step_images, sampled_images], dim=1).view(-1, *two_step_images.shape[1:])
-    grid = torchvision.utils.make_grid(sampled_images, nrow=3)
+    interleaved = torch.stack([sampled_images, cfg_sampled_images], dim=1).view(-1, *sampled_images.shape[1:])
+    grid = torchvision.utils.make_grid(interleaved, nrow=6, normalize=True, scale_each=True)
     return grid
 
 def get_dataset(bs, seed, device, num_workers=16):
@@ -86,11 +86,11 @@ if __name__ == "__main__":
     embed_dim = 1152
     num_heads = embed_dim // 32
     mlp_dim = embed_dim
-    num_experts = 64
-    active_experts = 2.0
+    num_experts = 16
+    capacity_factor = 2.0
     shared_experts = 1
     token_mixer_layers = 2
-    image_text_expert_ratio = 16
+    image_text_expert_ratio = 4
     dropout = 0.1
 
     params = ReiMeiParameters(
@@ -102,7 +102,7 @@ if __name__ == "__main__":
         siglip_dim=SIGLIP_EMBED_DIM,
         bert_dim=BERT_EMBED_DIM,
         num_experts=num_experts,
-        active_experts=active_experts,
+        capacity_factor=capacity_factor,
         shared_experts=shared_experts,
         dropout=dropout,
         token_mixer_layers=token_mixer_layers,
@@ -122,11 +122,11 @@ if __name__ == "__main__":
     # dataset = MemmapDataset(f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth")
     # dataset = DataLoader(dataset, batch_size=BS, shuffle=True, num_workers=0)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.01)
 
     scheduler = OneCycleLR(optimizer, max_lr=LR, total_steps=TRAIN_STEPS)
 
-    model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, dataset)
+    model, optimizer, scheduler, train_dataloader = accelerator.prepare(model, optimizer, scheduler, dataset)
 
     # checkpoint = torch.load(f"models/reimei_model_and_optimizer_0_f32.pt")
     # model.load_state_dict(checkpoint['model_state_dict'])
@@ -153,6 +153,8 @@ if __name__ == "__main__":
         # ex_bert_emb = torch.zeros(9, 64, 1024).to(device, dtype=DTYPE)
         # ex_bert_vec = torch.zeros(9, 1024).to(device, dtype=DTYPE)
         # example_latents = example_batch.to(device, dtype=DTYPE)[:9]
+
+        # print("Example latents std dev and mean:", torch.std_mean(example_latents * AE_SCALING_FACTOR))
         
         with torch.no_grad():
             example_ground_truth = dc_ae.decode(example_latents).sample
@@ -185,6 +187,9 @@ if __name__ == "__main__":
         bs, c, h, w = latents.shape
         latents = latents * AE_SCALING_FACTOR
 
+        # if batch_idx % 200 == 0:
+            # print("Batch Latents std dev mean", torch.std_mean(latents))
+
         # siglip_emb = torch.zeros(bs, 64, 1152).to(device, dtype=DTYPE)
         # siglip_vec = torch.zeros(bs, 1152).to(device, dtype=DTYPE)
         # bert_emb = torch.zeros(bs, 64, 1024).to(device, dtype=DTYPE)
@@ -202,17 +207,18 @@ if __name__ == "__main__":
         texp = t.view([bs, 1, 1, 1]).to(device, dtype=DTYPE)
 
         z = torch.randn_like(latents, device=device, dtype=DTYPE)
-        x_t = (texp * latents) + ((1 - texp) * z)
+        x_t = (1 - texp) * latents + texp * z
 
         vtheta = model(x_t, t, siglip_emb, siglip_vec, bert_emb, bert_vec, mask)
 
+        # if batch_idx % 200 == 0:
+            # print("vtheta std dev mean", torch.std_mean(vtheta))
+
         latents = apply_mask_to_tensor(latents, mask)
-        z = apply_mask_to_tensor(z, mask)
         vtheta = apply_mask_to_tensor(vtheta, mask)
+        z = apply_mask_to_tensor(z, mask)
 
-        v = latents - z
-
-        mse = ((vtheta - v) ** 2).mean()
+        mse = ((z - latents - vtheta) ** 2).mean()
         loss = mse * 1 / (1 - MASK_RATIO)
 
         optimizer.zero_grad()
@@ -221,17 +227,20 @@ if __name__ == "__main__":
         scheduler.step()
 
         # Ema only for last 5% of steps
-        if batch_idx >= TRAIN_STEPS * 0.95:
-            if batch_idx == TRAIN_STEPS * 0.95:
+        if batch_idx >= int(TRAIN_STEPS * 0.95):
+            if batch_idx == int(TRAIN_STEPS * 0.95):
                 ema_model = deepcopy(model)
             else:
                 update_ema(ema_model, model, ema_decay)
 
         progress_bar.set_postfix(loss=loss.item())
+        
         if accelerator.is_main_process:
             losses.append(loss.item())
 
-            if batch_idx % 1000 == 0:
+        if batch_idx % 200 == 0:
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
                 model.eval()
                 dc_ae = dc_ae.to(device)
 
@@ -244,8 +253,9 @@ if __name__ == "__main__":
 
                 model.train()
 
-            if ((batch_idx % (TRAIN_STEPS//10)) == 0) and batch_idx != 0:
-                accelerator.wait_for_everyone()
+        if ((batch_idx % (TRAIN_STEPS//10)) == 0) and batch_idx != 0:
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
                 unwrapped_model = accelerator.unwrap_model(model)
                 unwrapped_optimizer = accelerator.unwrap_model(optimizer)
                 model_save_path = f"models/reimei_model_and_optimizer_{batch_idx//(TRAIN_STEPS//10)}_f32.pt"

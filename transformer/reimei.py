@@ -1,6 +1,8 @@
 import math
 import torch.nn as nn
 from torch.nn.modules.normalization import RMSNorm
+
+from transformer.moedit import MoeMLP
 from .embed import sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
 from .utils import remove_masked_tokens, add_masked_tokens
 from .backbone import BackboneParams, TransformerBackbone
@@ -19,7 +21,7 @@ class ReiMeiParameters:
     siglip_dim: int
     bert_dim: int
     num_experts: int = 4
-    active_experts: int = 2
+    capacity_factor: float = 2.0
     shared_experts: int = 2
     dropout: float = 0.1
     token_mixer_layers: int = 2
@@ -39,7 +41,7 @@ class ReiMei(nn.Module):
         text_embed_dim (int): Dimension of the text embedding.
         vector_embed_dim (int): Dimension of the vector embedding.
         num_experts (int, optional): Number of experts in the transformer backbone. Default is 4.
-        active_experts (int, optional): Number of active experts in the transformer backbone. Default is 2.
+        capacity_factor (float, optional): Average number of experts per token. Default is 2.0.
         shared_experts (int, optional): Number of shared experts in the transformer backbone. Default is 2.
         dropout (float, optional): Dropout rate. Default is 0.1.
         patch_mixer_layers (int, optional): Number of layers in the patch mixer. Default is 2.
@@ -79,7 +81,7 @@ class ReiMei(nn.Module):
         self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim)
         
         # TokenMixer
-        self.token_mixer = TokenMixer(self.embed_dim, params.num_heads, params.token_mixer_layers, num_experts=params.num_experts, num_experts_per_tok=params.active_experts)
+        self.token_mixer = TokenMixer(self.embed_dim, params.num_heads, params.token_mixer_layers, num_experts=params.num_experts, num_experts_per_tok=params.capacity_factor, exp_ratio=params.image_text_expert_ratio)
 
         backbone_params = BackboneParams(
             input_dim=self.channels,
@@ -88,7 +90,7 @@ class ReiMei(nn.Module):
             num_heads=params.num_heads,
             mlp_dim=params.mlp_dim,
             num_experts=params.num_experts,
-            active_experts=params.active_experts,
+            capacity_factor=params.capacity_factor,
             shared_experts=params.shared_experts,
             dropout=params.dropout,
             image_text_expert_ratio=params.image_text_expert_ratio,
@@ -102,6 +104,8 @@ class ReiMei(nn.Module):
         self.initialize_weights()
 
     def initialize_weights(self):
+        s = 1.0 / math.sqrt(self.embed_dim)
+
         # Initialize all linear layers and biases
         def _basic_init(module):
             if isinstance(module, nn.LayerNorm):
@@ -110,28 +114,33 @@ class ReiMei(nn.Module):
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
             elif isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
+                nn.init.normal_(module.weight, std=s)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
 
-        # def _mup_init(module):
-        #     if isinstance(module, nn.Linear):
-        #         nn.init.normal_(module.weight, std=0.02 / math.sqrt(m_d))
-
         # Apply basic initialization to all modules
         self.apply(_basic_init)
-        # self.apply(_mup_init)
 
-        for embedder in [self.siglip_embedder, self.bert_embedder, self.vector_embedder, self.image_embedder]:
-            nn.init.normal_(embedder.mlp[0].weight, std=0.02)
-            nn.init.normal_(embedder.mlp[2].weight, std=0.02)
-            nn.init.constant_(embedder.mlp[0].bias, 0)
-            nn.init.constant_(embedder.mlp[2].bias, 0)
+        def _mlp_embedder_init(module):
+            if isinstance(module, MLPEmbedder):
+                # First linear layer: use Kaiming uniform for layers followed by GELU.
+                nn.init.kaiming_uniform_(module.mlp[0].weight)
+                if module.mlp[0].bias is not None:
+                    nn.init.constant_(module.mlp[0].bias, 0)
+                # Second linear layer: use Xavier uniform.
+                nn.init.xavier_uniform_(module.mlp[2].weight)
+                if module.mlp[2].bias is not None:
+                    nn.init.constant_(module.mlp[2].bias, 0)
 
-        nn.init.normal_(self.time_embedder.mlp.mlp[0].weight, std=0.02)
-        nn.init.normal_(self.time_embedder.mlp.mlp[2].weight, std=0.02)
-        nn.init.constant_(self.time_embedder.mlp.mlp[0].bias, 0)
-        nn.init.constant_(self.time_embedder.mlp.mlp[2].bias, 0)
+        self.apply(_mlp_embedder_init)
+
+        def _moe_mlp_init(module):
+            if isinstance(module, MoeMLP):
+                nn.init.kaiming_uniform_(module.gate_proj.weight)
+                nn.init.kaiming_uniform_(module.up_proj.weight)
+                nn.init.xavier_uniform_(module.down_proj.weight)
+
+        self.apply(_moe_mlp_init)
 
         # Zero-out the last linear layer in the output to ensure initial predictions are zero
         nn.init.constant_(self.output_layer.mlp.weight, 0)
@@ -200,7 +209,7 @@ class ReiMei(nn.Module):
         dt = torch.tensor([dt] * b).to(z.device, torch.bfloat16).view([b, *([1] * len(z.shape[1:]))])
         images = [z]
 
-        for i in range(sample_steps):
+        for i in range(sample_steps, 0, -1):
             t = i / sample_steps
             t = torch.tensor([t] * b).to(z.device, torch.bfloat16)
 
@@ -213,7 +222,9 @@ class ReiMei(nn.Module):
                 vu = self(z, t, null_sig_emb, null_sig_vec, null_bert_emb, null_bert_vec, None)
                 vc = vu + cfg * (vc - vu)
 
-            z = z + dt * vc
+            z = z - dt * vc
             images.append(z)
+
+        # print("Std dev and mean of sampled images", torch.std_mean(images[-1]))
 
         return (images[-1] / AE_SCALING_FACTOR)

@@ -1,5 +1,5 @@
 from datasets import load_dataset, Features, Value, Sequence
-from config import DS_DIR_BASE, DATASET_NAME, USERNAME, BERT_HF_NAME, SIGLIP_HF_NAME, MODELS_DIR_BASE
+from config import DS_DIR_BASE, DATASET_NAME, USERNAME, BERT_HF_NAME, SIGLIP_HF_NAME, MODELS_DIR_BASE, AE_SCALING_FACTOR
 from transformers import SiglipTokenizer, SiglipTextModel, AutoTokenizer, ModernBertModel
 import time
 import datasets
@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 
 if __name__ == "__main__":
     datasets.config.HF_HUB_OFFLINE = 1
-    ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=8, split="train")
+    ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=1, split="train")
     ds = ds.to_iterable_dataset(1000)
 
     device="cuda"
@@ -19,10 +19,12 @@ if __name__ == "__main__":
     bert_model = ModernBertModel.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert").to(device)
     bert_tokenizer = AutoTokenizer.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert")
 
-    ds = ShapeBatchingDataset(ds, 16, siglip_tokenizer, siglip_model, bert_tokenizer, bert_model, 32, device)
+    ds = ShapeBatchingDataset(ds, 16, siglip_tokenizer, siglip_model, bert_tokenizer, bert_model, device, 1)
 
     t = time.time()
     for row in ds:
         print(f"Took: {time.time() - t}")
-
+        x = row["ae_latent"]
+        x = x * AE_SCALING_FACTOR
+        print("std dev, mean", torch.std_mean(x))
         t = time.time()

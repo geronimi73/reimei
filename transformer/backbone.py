@@ -10,7 +10,7 @@ class BackboneParams:
     num_heads: int
     mlp_dim: int
     num_experts: int = 4
-    active_experts: int = 2
+    capacity_factor: float = 2.0
     shared_experts: int = 2
     dropout: float = 0.1
     image_text_expert_ratio: int = 4
@@ -48,7 +48,7 @@ class TransformerBackbone(nn.Module):
             else:  # Odd layers use MoE DiT
                 n_exp = params.num_experts
                 n_shared = params.shared_experts
-                n_act = params.active_experts
+                n_act = params.capacity_factor
 
             if i < params.num_layers // 2: # First half uses DoubleStreamBlock
                 self.layers.append(DoubleStreamBlock(params.embed_dim, scaled_num_heads, mlp_ratio, 

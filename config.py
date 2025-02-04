@@ -4,13 +4,13 @@ DS_DIR_BASE = "../datasets"
 MODELS_DIR_BASE = "../models"
 AE_SCALING_FACTOR = 0.4552
 
-BS = 128
+BS = 32
 TRAIN_STEPS = 10000
 MASK_RATIO = 0.75
 CFG_RATIO = 0.02
 SEED = 42
 
-LR = 5e-4
+LR = 0.001
 
 AE_HF_NAME = "dc-ae-f32c32-mix-1.0-diffusers"
 AE_CHANNELS = 32

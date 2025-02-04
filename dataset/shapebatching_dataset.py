@@ -58,16 +58,17 @@ class ShapeBatchingDataset(IterableDataset):
         ae_latent = torch.tensor(np.stack([np.array(s, dtype=np.float16).copy() for s in samples['ae_latent']])).reshape(-1, *latent_shape)
         # ae_latent = torch.stack([s['ae_latent'].reshape(*ae_latent_shape) for s in samples])
 
-        s_tokens = self.siglip_tokenizer(samples["caption"], padding='longest', truncation=True, return_tensors="pt").to(self.device)
-        b_tokens = self.bert_tokenizer(["[CLS]"+ s for s in samples["caption"]], padding='longest', truncation=True, return_tensors="pt", max_length=65).to(self.device)
+        with torch.no_grad():
+            s_tokens = self.siglip_tokenizer(samples["caption"], padding='longest', truncation=True, return_tensors="pt").to(self.device)
+            b_tokens = self.bert_tokenizer(["[CLS]"+ s for s in samples["caption"]], padding='longest', truncation=True, return_tensors="pt", max_length=65).to(self.device)
 
-        siglip_outputs = self.siglip_model(**s_tokens, output_hidden_states=True)
-        siglip_embedding = siglip_outputs.hidden_states[-1]
-        siglip_vec = siglip_outputs.pooler_output
+            siglip_outputs = self.siglip_model(**s_tokens, output_hidden_states=True)
+            siglip_embedding = siglip_outputs.hidden_states[-1]
+            siglip_vec = siglip_outputs.pooler_output
 
-        bert_outputs = self.bert_model(**b_tokens, output_hidden_states=True).hidden_states[-1] # (bs, 65, 768). The 65 is CLS + 64 tokens. So we need to seperate the CLS token from the rest.
-        bert_vec = bert_outputs[:, 0, :] # (bs, 1024)
-        bert_embedding = bert_outputs[:, 1:, :] # (bs, 64, 1024)
+            bert_outputs = self.bert_model(**b_tokens, output_hidden_states=True).hidden_states[-1] # (bs, 65, 768). The 65 is CLS + 64 tokens. So we need to seperate the CLS token from the rest.
+            bert_vec = bert_outputs[:, 0, :] # (bs, 1024)
+            bert_embedding = bert_outputs[:, 1:, :] # (bs, 64, 1024)
 
         batch = {
             'caption': samples["caption"],
