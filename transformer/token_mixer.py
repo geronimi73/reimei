@@ -20,7 +20,7 @@ class TokenMixer(nn.Module):
         num_layers: int = 2,
         mlp_ratio: int = 4,
         num_experts: int = 8,
-        num_experts_per_tok: int = 2,
+        capacity_factor: int = 2.0,
         pretraining_tp: int = 2,
         num_shared_experts: int = 2,
         exp_ratio: int = 4
@@ -32,7 +32,7 @@ class TokenMixer(nn.Module):
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
                 num_experts=num_experts,
-                num_experts_per_tok=num_experts_per_tok,
+                capacity_factor=capacity_factor,
                 pretraining_tp=pretraining_tp,
                 num_shared_experts=num_shared_experts,
                 exp_ratio=exp_ratio

@@ -155,7 +155,7 @@ class OutputLayer(nn.Module):
     def __init__(self, hidden_size: int, out_channels: int):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.mlp = nn.Linear(hidden_size, out_channels)
+        self.mlp = MLPEmbedder(hidden_size, out_channels)
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True))
 
     def forward(self, x: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
@@ -163,3 +163,13 @@ class OutputLayer(nn.Module):
         x = (1 + scale[:, None, :]) * self.norm_final(x) + shift[:, None, :]
         x = self.mlp(x)
         return x
+    
+class PatchEmbed(nn.Module):
+    def __init__(self, in_channels, embed_dim, patch_size):
+        super().__init__()
+        self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.mlp = MLPEmbedder(embed_dim, embed_dim)
+
+    def forward(self, x):
+        x = self.proj(x)  # (B, C, H, W) -> (B, E, H', W')
+        return self.mlp(x.flatten(2).transpose(1, 2))  # (B, E, H', W') -> (B, H'*W', E)

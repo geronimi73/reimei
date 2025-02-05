@@ -6,8 +6,8 @@ from torch.utils.data import DataLoader
 
 def custom_collate(batch):
     captions = [item['caption'] for item in batch]
-    ae_latents = [item['ae_latent'] for item in batch]
-    ae_latent_shapes = [item['ae_latent_shape'] for item in batch]
+    ae_latents = [item['vae_latent'] for item in batch]
+    ae_latent_shapes = [item['vae_latent_shape'] for item in batch]
 
     return {
         'caption': captions,
@@ -33,7 +33,7 @@ class ShapeBatchingDataset(IterableDataset):
         while True:
             if self.shuffle:
                 self.dataset = self.dataset.shuffle(seed=self.seed, buffer_size=self.batch_size*self.buffer_multiplier)
-                self.dataloader = DataLoader(self.dataset, self.batch_size, num_workers=self.num_workers, collate_fn=custom_collate)
+                self.dataloader = DataLoader(self.dataset, self.batch_size * 2, prefetch_factor=5, num_workers=self.num_workers, collate_fn=custom_collate)
             
             shape_batches = defaultdict(lambda: {'caption': [], 'ae_latent': []})
             for batch in self.dataloader:
@@ -55,7 +55,8 @@ class ShapeBatchingDataset(IterableDataset):
 
     def prepare_batch(self, samples, latent_shape):# -> dict[str, Any]:
         # Convert lists of samples into tensors
-        ae_latent = torch.tensor(np.stack([np.array(s, dtype=np.float16).copy() for s in samples['ae_latent']])).reshape(-1, *latent_shape)
+        ae_latent = torch.tensor(np.stack([np.frombuffer(s, dtype=np.float32).copy() for s in samples["ae_latent"]])).reshape(-1, *latent_shape)
+        # ae_latent = torch.tensor(np.stack([np.array(s, dtype=np.float16).copy() for s in samples['ae_latent']])).reshape(-1, *latent_shape)
         # ae_latent = torch.stack([s['ae_latent'].reshape(*ae_latent_shape) for s in samples])
 
         with torch.no_grad():

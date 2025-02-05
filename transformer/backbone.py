@@ -48,7 +48,7 @@ class TransformerBackbone(nn.Module):
             else:  # Odd layers use MoE DiT
                 n_exp = params.num_experts
                 n_shared = params.shared_experts
-                n_act = params.capacity_factor
+                n_act = min(params.capacity_factor, float(n_exp))
 
             if i < params.num_layers // 2: # First half uses DoubleStreamBlock
                 self.layers.append(DoubleStreamBlock(params.embed_dim, scaled_num_heads, mlp_ratio, 

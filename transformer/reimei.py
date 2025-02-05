@@ -1,9 +1,8 @@
 import math
 import torch.nn as nn
 from torch.nn.modules.normalization import RMSNorm
-
 from transformer.moedit import MoeMLP
-from .embed import sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
+from .embed import PatchEmbed, sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
 from .utils import remove_masked_tokens, add_masked_tokens
 from .backbone import BackboneParams, TransformerBackbone
 from .token_mixer import TokenMixer
@@ -14,6 +13,7 @@ from dataclasses import dataclass
 @dataclass
 class ReiMeiParameters:
     channels: int
+    patch_size: tuple[int, int]
     embed_dim: int
     num_layers: int
     num_heads: int
@@ -34,6 +34,7 @@ class ReiMei(nn.Module):
 
         Args:
         channels (int): Number of input channels in the image data.
+        patch_size (Tuple[int, int]): Size of the patch.
         embed_dim (int): Dimension of the embedding space.
         num_layers (int): Number of layers in the transformer backbone.
         num_heads (int): Number of attention heads in the multi-head attention mechanism.
@@ -63,12 +64,13 @@ class ReiMei(nn.Module):
         self.embed_dim = params.embed_dim
         self.pos_emb_dim = params.embed_dim // params.num_heads
         self.channels = params.channels
+        self.patch_size = params.patch_size
         
         # Timestep embedding
         self.time_embedder = TimestepEmbedder(self.embed_dim)
 
         # Image embedding
-        self.image_embedder = MLPEmbedder(self.channels, self.embed_dim)
+        self.image_embedder = PatchEmbed(self.channels, self.embed_dim, self.patch_size)
         
         # Text embedding
         self.siglip_embedder = MLPEmbedder(params.siglip_dim, self.embed_dim)
@@ -81,7 +83,7 @@ class ReiMei(nn.Module):
         self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim)
         
         # TokenMixer
-        self.token_mixer = TokenMixer(self.embed_dim, params.num_heads, params.token_mixer_layers, num_experts=params.num_experts, num_experts_per_tok=params.capacity_factor, exp_ratio=params.image_text_expert_ratio)
+        self.token_mixer = TokenMixer(self.embed_dim, params.num_heads, params.token_mixer_layers, num_experts=params.num_experts, capacity_factor=params.capacity_factor, exp_ratio=params.image_text_expert_ratio)
 
         backbone_params = BackboneParams(
             input_dim=self.channels,
@@ -99,7 +101,7 @@ class ReiMei(nn.Module):
         # Backbone transformer model
         self.backbone = TransformerBackbone(backbone_params)
         
-        self.output_layer = OutputLayer(self.embed_dim, self.channels)
+        self.output_layer = OutputLayer(self.embed_dim, self.channels * self.patch_size[0] * self.patch_size[1])
 
         self.initialize_weights()
 
@@ -143,8 +145,8 @@ class ReiMei(nn.Module):
         self.apply(_moe_mlp_init)
 
         # Zero-out the last linear layer in the output to ensure initial predictions are zero
-        nn.init.constant_(self.output_layer.mlp.weight, 0)
-        nn.init.constant_(self.output_layer.mlp.bias, 0)
+        nn.init.constant_(self.output_layer.mlp.mlp[2].weight, 0)
+        nn.init.constant_(self.output_layer.mlp.mlp[2].bias, 0)
 
     def forward(self, img, time, sig_txt, sig_vec, bert_txt, bert_vec, mask=None):
         # img: (batch_size, channels, height, width)
@@ -155,9 +157,8 @@ class ReiMei(nn.Module):
         # bert_vec: (batch_size, bert_dim)
         # mask: (batch_size, num_tokens)
         batch_size, channels, height, width = img.shape
-
-        # Reshape and transmute img to have shape (batch_size, height*width, channels)
-        img = img.permute(0, 2, 3, 1).contiguous().view(batch_size, height * width, channels)
+        ps_h, ps_w = self.patch_size
+        patched_h, patched_w = height // ps_h, width // ps_w
 
         # Text embeddings
         sig_txt = self.siglip_embedder(sig_txt)
@@ -173,21 +174,21 @@ class ReiMei(nn.Module):
         # Image embedding
         img = self.image_embedder(img)
 
-        # (height, width, embed_dim)
-        sincos_pos_embed = sincos_2d(self.embed_dim, height, width)
+        # (height // patch_size_h, width // patch_size_w, embed_dim)
+        sincos_pos_embed = sincos_2d(self.embed_dim, patched_h, patched_w)
         sincos_pos_embed = sincos_pos_embed.to(device=img.device, dtype=img.dtype).unsqueeze(0).expand(batch_size, -1, -1)
         
         img = img + sincos_pos_embed
 
         # Patch-mixer
-        img, txt = self.token_mixer(img, txt, vec, height, width)
+        img, txt = self.token_mixer(img, txt, vec, patched_h, patched_w)
 
         # Remove masked patches
         if mask is not None:
             img = remove_masked_tokens(img, mask)
 
         # Backbone transformer model
-        img = self.backbone(img, txt, vec, mask, height, width)
+        img = self.backbone(img, txt, vec, mask, patched_h, patched_w)
         
         # Final output layer
         # (bs, unmasked_num_tokens, embed_dim) -> (bs, unmasked_num_tokens, in_channels)

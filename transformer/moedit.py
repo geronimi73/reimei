@@ -268,7 +268,7 @@ class DoubleStreamBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float = 4.0,
         num_experts=8,
-        num_experts_per_tok=2,
+        capacity_factor=2.0,
         pretraining_tp=2,
         num_shared_experts=2,
         dropout: float = 0.1,
@@ -299,12 +299,13 @@ class DoubleStreamBlock(nn.Module):
         self.txt_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
         text_exps = max(1, num_experts // exp_ratio)
+        text_capacity = min(float(text_exps), capacity_factor)
 
         self.img_moe = SparseMoeBlock(
-            hidden_size, mlp_ratio, num_experts, num_experts_per_tok, pretraining_tp, num_shared_experts
+            hidden_size, mlp_ratio, num_experts, capacity_factor, pretraining_tp, num_shared_experts
         )
         self.txt_moe = SparseMoeBlock(
-            hidden_size, mlp_ratio, text_exps, num_experts_per_tok, pretraining_tp, num_shared_experts
+            hidden_size, mlp_ratio, text_exps, text_capacity, pretraining_tp, num_shared_experts
         )
 
     def forward(
@@ -403,7 +404,7 @@ class SingleStreamBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float = 4.0,
         num_experts: int = 8,
-        num_experts_per_tok: int = 2,
+        capacity_factor: int = 2,
         pretraining_tp: int = 2,
         num_shared_experts: int = 2,
         dropout: float = 0.1,
@@ -433,7 +434,7 @@ class SingleStreamBlock(nn.Module):
             hidden_size,
             mlp_ratio,
             num_experts,
-            num_experts_per_tok,
+            capacity_factor,
             pretraining_tp,
             num_shared_experts,
         )

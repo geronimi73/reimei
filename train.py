@@ -15,7 +15,8 @@ import pickle
 from torch.utils.data import DataLoader
 import numpy as np
 from torch.utils.data import Dataset
-from diffusers import AutoencoderDC
+# from diffusers import AutoencoderDC
+from diffusers import AutoencoderKL
 from torch.optim.lr_scheduler import OneCycleLR
 from transformers import SiglipTokenizer, SiglipTextModel, AutoTokenizer, ModernBertModel
 
@@ -37,8 +38,9 @@ def sample_images(model, vae, noise, sig_emb, sig_vec, bert_emb, bert_vec):
     return grid
 
 def get_dataset(bs, seed, device, num_workers=16):
-    ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}",num_proc=num_workers, split="train")
-    ds = ds.to_iterable_dataset(1000)
+    ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", split="train", streaming=True)
+    # ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=num_workers, split="train")
+    # ds = ds.to_iterable_dataset(1000)
     siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device)
     siglip_tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
     bert_model = ModernBertModel.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert").to(device)
@@ -79,34 +81,28 @@ def update_ema(ema_model, model, decay):
 
 if __name__ == "__main__":
     # Comment this out if you havent downloaded dataset and models yet
-    datasets.config.HF_HUB_OFFLINE = 1
+    # datasets.config.HF_HUB_OFFLINE = 1
+    # torch.set_float32_matmul_precision('high')
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    input_dim = AE_CHANNELS
-    num_layers = 24
     embed_dim = 1152
-    num_heads = embed_dim // 32
-    mlp_dim = embed_dim
-    num_experts = 16
-    capacity_factor = 2.0
-    shared_experts = 1
-    token_mixer_layers = 2
-    image_text_expert_ratio = 4
-    dropout = 0.1
+    patch_size = (2,2)
 
     params = ReiMeiParameters(
-        channels=input_dim,
+        channels=AE_CHANNELS,
+        patch_size=patch_size,
         embed_dim=embed_dim,
-        num_layers=num_layers,
-        num_heads=num_heads,
-        mlp_dim=mlp_dim,
+        num_layers=12,
+        num_heads=(embed_dim // 32),
+        mlp_dim=embed_dim,
         siglip_dim=SIGLIP_EMBED_DIM,
         bert_dim=BERT_EMBED_DIM,
-        num_experts=num_experts,
-        capacity_factor=capacity_factor,
-        shared_experts=shared_experts,
-        dropout=dropout,
-        token_mixer_layers=token_mixer_layers,
-        image_text_expert_ratio=image_text_expert_ratio,
+        num_experts=4,
+        capacity_factor=2.0,
+        shared_experts=1,
+        dropout=0.1,
+        token_mixer_layers=2,
+        image_text_expert_ratio=4,
     )
 
     accelerator = Accelerator()
@@ -135,12 +131,13 @@ if __name__ == "__main__":
     # del checkpoint
     
     if accelerator.is_main_process:
-        dc_ae = AutoencoderDC.from_pretrained(f"mit-han-lab/{AE_HF_NAME}", torch_dtype=DTYPE, cache_dir=f"{MODELS_DIR_BASE}/dc_ae", revision="main").to(device).eval()
-        assert dc_ae.config.scaling_factor == AE_SCALING_FACTOR, f"Scaling factor mismatch: {dc_ae.config.scaling_factor} != {AE_SCALING_FACTOR}"
+        # ae = AutoencoderDC.from_pretrained(f"mit-han-lab/{AE_HF_NAME}", torch_dtype=DTYPE, cache_dir=f"{MODELS_DIR_BASE}/ae", revision="main").to(device).eval()
+        ae =  AutoencoderKL.from_pretrained(f"{AE_HF_NAME}", cache_dir=f"{MODELS_DIR_BASE}/vae").to(device=device, dtype=DTYPE).eval()
+        assert ae.config.scaling_factor == AE_SCALING_FACTOR, f"Scaling factor mismatch: {ae.config.scaling_factor} != {AE_SCALING_FACTOR}"
         
         os.makedirs("logs", exist_ok=True)
 
-        noise = torch.randn(9, AE_CHANNELS, 16, 16).to(device, dtype=DTYPE)
+        noise = torch.randn(9, AE_CHANNELS, 32, 32).to(device, dtype=DTYPE)
         example_batch = next(iter(dataset))
         ex_sig_emb = example_batch["siglip_emb"][:9].to(device, dtype=DTYPE)
         ex_sig_vec = example_batch["siglip_vec"][:9].to(device, dtype=DTYPE)
@@ -157,7 +154,7 @@ if __name__ == "__main__":
         # print("Example latents std dev and mean:", torch.std_mean(example_latents * AE_SCALING_FACTOR))
         
         with torch.no_grad():
-            example_ground_truth = dc_ae.decode(example_latents).sample
+            example_ground_truth = ae.decode(example_latents).sample
         grid = torchvision.utils.make_grid(example_ground_truth, nrow=3, normalize=True, scale_each=True)
         torchvision.utils.save_image(grid, f"logs/example_images.png")
 
@@ -165,7 +162,7 @@ if __name__ == "__main__":
         with open("logs/example_captions.txt", "w") as f:
             for index, caption in enumerate(example_captions):
                 f.write(f"{index}: {caption}\n")
-        dc_ae = dc_ae.to("cpu")
+        ae = ae.to("cpu")
         losses = []
 
         del example_batch, example_captions, example_latents, example_ground_truth, grid
@@ -195,9 +192,9 @@ if __name__ == "__main__":
         # bert_emb = torch.zeros(bs, 64, 1024).to(device, dtype=DTYPE)
         # bert_vec = torch.zeros(bs, 1024).to(device, dtype=DTYPE)
 
-        mask = random_mask(bs, latents.shape[-2], latents.shape[-1], mask_ratio=MASK_RATIO).to(device, dtype=DTYPE)
+        mask = random_mask(bs, latents.shape[-2], latents.shape[-1], patch_size, mask_ratio=MASK_RATIO).to(device, dtype=DTYPE)
 
-        cfg_mask = random_mask(bs, 1, 1, CFG_RATIO).to(device, dtype=DTYPE).view(bs)
+        cfg_mask = random_mask(bs, 1, 1, (1, 1), CFG_RATIO).to(device, dtype=DTYPE).view(bs)
         siglip_emb = siglip_emb * cfg_mask.view(bs, 1, 1)
         siglip_vec = siglip_vec * cfg_mask.view(bs, 1)
         bert_emb = bert_emb * cfg_mask.view(bs, 1, 1)
@@ -214,9 +211,9 @@ if __name__ == "__main__":
         # if batch_idx % 200 == 0:
             # print("vtheta std dev mean", torch.std_mean(vtheta))
 
-        latents = apply_mask_to_tensor(latents, mask)
-        vtheta = apply_mask_to_tensor(vtheta, mask)
-        z = apply_mask_to_tensor(z, mask)
+        latents = apply_mask_to_tensor(latents, mask, patch_size)
+        vtheta = apply_mask_to_tensor(vtheta, mask, patch_size)
+        z = apply_mask_to_tensor(z, mask, patch_size)
 
         mse = ((z - latents - vtheta) ** 2).mean()
         loss = mse * 1 / (1 - MASK_RATIO)
@@ -242,14 +239,14 @@ if __name__ == "__main__":
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
                 model.eval()
-                dc_ae = dc_ae.to(device)
+                ae = ae.to(device)
 
-                grid = sample_images(model, dc_ae, noise, ex_sig_emb, ex_sig_vec, ex_bert_emb, ex_bert_vec)
+                grid = sample_images(model, ae, noise, ex_sig_emb, ex_sig_vec, ex_bert_emb, ex_bert_vec)
                 torchvision.utils.save_image(grid, f"logs/sampled_images_step_{batch_idx}.png")
 
                 del grid
 
-                dc_ae = dc_ae.to("cpu")
+                ae = ae.to("cpu")
 
                 model.train()
 
