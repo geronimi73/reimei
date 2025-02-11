@@ -1,3 +1,4 @@
+from typing import Optional
 import torch
 import torch.nn as nn
 import math
@@ -104,13 +105,24 @@ def sincos_1d(embed_dim, pos):
     return emb
 
 class MLPEmbedder(nn.Module):
-    def __init__(self, in_dim: int, hidden_dim: int):
+    def __init__(self, in_dim: int, out_dim: int, hidden_dim: Optional[int] = None, num_layers: int = 2):
         super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim, bias=True),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim, bias=True),
-        )
+        layers = max(num_layers, 2)
+        
+        if hidden_dim is None:
+            hidden_dim = max(in_dim, out_dim)
+        
+        mlp_layers = []
+        mlp_layers.append(nn.Linear(in_dim, hidden_dim, bias=True))
+        mlp_layers.append(nn.GELU())
+        
+        for _ in range(layers - 2):
+            mlp_layers.append(nn.Linear(hidden_dim, hidden_dim, bias=True))
+            mlp_layers.append(nn.GELU())
+
+        mlp_layers.append(nn.Linear(hidden_dim, out_dim, bias=True))
+        
+        self.mlp = nn.Sequential(*mlp_layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)
@@ -152,11 +164,11 @@ class TimestepEmbedder(nn.Module):
         return t_emb
     
 class OutputLayer(nn.Module):
-    def __init__(self, hidden_size: int, out_channels: int):
+    def __init__(self, in_dim: int, out_dim: int):
         super().__init__()
-        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.mlp = MLPEmbedder(hidden_size, out_channels)
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True))
+        self.norm_final = nn.LayerNorm(in_dim, elementwise_affine=False, eps=1e-6)
+        self.mlp = MLPEmbedder(in_dim, out_dim, hidden_dim=in_dim*4, num_layers=4)
+        self.adaLN_modulation = nn.Sequential(nn.GELU(), nn.Linear(in_dim, 2 * in_dim, bias=True))
 
     def forward(self, x: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
         shift, scale = self.adaLN_modulation(vec).chunk(2, dim=1)
@@ -168,8 +180,7 @@ class PatchEmbed(nn.Module):
     def __init__(self, in_channels, embed_dim, patch_size):
         super().__init__()
         self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
-        self.mlp = MLPEmbedder(embed_dim, embed_dim)
 
     def forward(self, x):
         x = self.proj(x)  # (B, C, H, W) -> (B, E, H', W')
-        return self.mlp(x.flatten(2).transpose(1, 2))  # (B, E, H', W') -> (B, H'*W', E)
+        return x.flatten(2).transpose(1, 2)  # (B, E, H', W') -> (B, H'*W', E)

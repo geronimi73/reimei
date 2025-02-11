@@ -4,15 +4,16 @@ import torch
 from transformer.reimei import ReiMeiParameters, ReiMei
 from transformer.moedit import SparseMoeBlock
 params = ReiMeiParameters(
-    channels=32,
-    embed_dim=1152,
-    num_layers=24,
-    num_heads=36,
-    mlp_dim=1152,
+    channels=4,
+    patch_size=(2,2),
+    embed_dim=768,
+    num_layers=12,
+    num_heads=768//64,
+    mlp_dim=768*4,
     siglip_dim=1152,
     bert_dim=1024,
-    num_experts=16,
-    active_experts=2.0,
+    num_experts=8,
+    capacity_factor=2.0,
     shared_experts=1,
     dropout=0.1,
     token_mixer_layers=2,
@@ -56,9 +57,9 @@ for name, submodule in model.named_modules():
         sum_diff += diff
         num_moe_blocks += 1
 
-        print(f"\nSparseMoeBlock '{name}':")
-        print(f"  - total params:  {block_total:,.0f}")
-        print(f"  - active params: {block_active:,.1f}  (approx, using block_total / {E} * {f_c})")
+        # print(f"\nSparseMoeBlock '{name}':")
+        # print(f"  - total params:  {block_total:,.0f}")
+        # print(f"  - active params: {block_active:,.1f}  (approx, using block_total / {E} * {f_c})")
 
 ##############################################################################
 # 5) Compute the overall "average active" param count.

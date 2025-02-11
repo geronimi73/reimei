@@ -109,3 +109,41 @@ def add_masked_tokens(tokens, mask):
         full_tokens[i, mask[i]] = tokens[i].to(full_tokens.dtype)
 
     return full_tokens
+
+def unpatchify(x, patch_size, height, width):
+    """
+    Reconstructs images from patches.
+
+    Args:
+        x (torch.Tensor): Tensor of shape (bs, num_patches, patch_size * patch_size * in_channels)
+        patch_size (int): Size of each patch.
+        height (int): Original image height.
+        width (int): Original image width.
+
+    Returns:
+        torch.Tensor: Reconstructed image of shape (bs, in_channels, height, width)
+    """
+    bs, num_patches, patch_dim = x.shape
+    H, W = patch_size
+    in_channels = patch_dim // (H * W)
+
+    # Calculate the number of patches along each dimension
+    num_patches_h = height // H
+    num_patches_w = width // W
+
+    # Ensure num_patches equals num_patches_h * num_patches_w
+    assert num_patches == num_patches_h * num_patches_w, "Mismatch in number of patches."
+
+    # Reshape x to (bs, num_patches_h, num_patches_w, H, W, in_channels)
+    x = x.view(bs, num_patches_h, num_patches_w, H, W, in_channels)
+
+    # Permute x to (bs, num_patches_h, H, num_patches_w, W, in_channels)
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
+
+    # Reshape x to (bs, height, width, in_channels)
+    reconstructed = x.view(bs, height, width, in_channels)
+
+    # Permute back to (bs, in_channels, height, width)
+    reconstructed = reconstructed.permute(0, 3, 1, 2).contiguous()
+
+    return reconstructed

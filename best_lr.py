@@ -32,7 +32,7 @@ from transformers import SiglipTokenizer, SiglipTextModel, AutoTokenizer, Modern
 DTYPE = torch.bfloat16
 
 def get_dataset(bs, seed, device, num_workers=16):
-    ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}",num_proc=num_workers, split="train")
+    ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=num_workers, split="train")
     ds = ds.to_iterable_dataset(1000)
     siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device)
     siglip_tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
@@ -104,7 +104,7 @@ def lr_range_test(
         latents_scaled = latents * AE_SCALING_FACTOR
 
         # Create a random mask
-        mask = random_mask(bs, latents_scaled.shape[-2], latents_scaled.shape[-1],
+        mask = random_mask(bs, latents_scaled.shape[-2], latents_scaled.shape[-1], (2,2),
                            mask_ratio=MASK_RATIO).to(device, dtype=DTYPE)
 
         # t ~ Uniform(0, 1)
@@ -124,9 +124,9 @@ def lr_range_test(
         )
 
         # Apply the mask to each relevant tensor
-        latents_scaled = apply_mask_to_tensor(latents_scaled, mask)
-        z = apply_mask_to_tensor(z, mask)
-        vtheta = apply_mask_to_tensor(vtheta, mask)
+        latents_scaled = apply_mask_to_tensor(latents_scaled, mask, (2,2))
+        z = apply_mask_to_tensor(z, mask, (2,2))
+        vtheta = apply_mask_to_tensor(vtheta, mask, (2,2))
 
         # v = original - noise
         v = latents_scaled - z
@@ -162,6 +162,9 @@ def lr_range_test(
     return lrs, losses
 
 if __name__ == "__main__":
+    torch.set_float32_matmul_precision('high')
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
     accelerator = Accelerator()
     device = accelerator.device
 
@@ -176,7 +179,7 @@ if __name__ == "__main__":
     experts_list = [8, 16, 32, 64]
 
     # Build dataset / dataloader
-    dataset = get_dataset(BS, SEED + accelerator.process_index, device, num_workers=8)
+    dataset = get_dataset(BS, SEED + accelerator.process_index, device, num_workers=4)
     # Just pass dataset along; we'll wrap it with accelerator in lr_range_test
     train_dataloader = dataset
 
@@ -184,7 +187,7 @@ if __name__ == "__main__":
     curves_dict = {}
 
     # LR finder range
-    init_lr = 1e-7
+    init_lr = 1e-5
     final_lr = 5e-3
     num_steps = 3000  # how many steps of the LR test
 
@@ -194,6 +197,7 @@ if __name__ == "__main__":
         # Build a fresh ReiMei model
         params = ReiMeiParameters(
             channels=AE_CHANNELS,
+            patch_size=(2,2),
             embed_dim=embed_dim,
             num_layers=num_layers,
             num_heads=num_heads,
@@ -201,7 +205,7 @@ if __name__ == "__main__":
             siglip_dim=SIGLIP_EMBED_DIM,
             bert_dim=BERT_EMBED_DIM,
             num_experts=nx,
-            active_experts=2.0,  # match your defaults
+            capacity_factor=2.0,  # match your defaults
             shared_experts=1,
             dropout=dropout,
             token_mixer_layers=2,
@@ -220,25 +224,25 @@ if __name__ == "__main__":
         )
         curves_dict[nx] = (lrs, losses)
 
-    # Plot all combos on one graph (main process only)
-    if accelerator.is_main_process:
-        os.makedirs("lr_graphs", exist_ok=True)
-        plt.figure()
+        # Plot all combos on one graph (main process only)
+        if accelerator.is_main_process:
+            os.makedirs("lr_graphs", exist_ok=True)
+            plt.figure()
 
-        for nx, (lrs, losses) in curves_dict.items():
+            # for nx, (lrs, losses) in curves_dict.items():
             plt.plot(lrs, losses, label=f"Experts={nx}")
 
-        plt.xscale("log")
-        plt.xlabel("Learning Rate (log scale)")
-        plt.ylabel("Smoothed Loss")
+            plt.xscale("log")
+            plt.xlabel("Learning Rate (log scale)")
+            plt.ylabel("Smoothed Loss")
 
-        # Adjust as desired
-        plt.ylim(bottom=1.2, top=1.6)
-        plt.title(f"LR Range Test (num_layers={num_layers}, varying num_experts)")
-        plt.legend()
+            # Adjust as desired
+            plt.ylim(bottom=1.0, top=2.0)
+            plt.title(f"LR Range Test (num_layers={num_layers}, num_experts {nx})")
+            plt.legend()
 
-        plot_filename = "lr_graphs/lr_experts.png"
-        plt.savefig(plot_filename)
-        plt.close()
+            plot_filename = f"lr_graphs/lr_experts_{nx}.png"
+            plt.savefig(plot_filename)
+            plt.close()
 
-        print(f"\nAll LR range tests complete. Combined plot saved to: {plot_filename}")
+            print(f"\nAll LR range tests complete. Combined plot saved to: {plot_filename}")

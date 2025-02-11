@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.nn.modules.normalization import RMSNorm
 from transformer.moedit import MoeMLP
 from .embed import PatchEmbed, sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
-from .utils import remove_masked_tokens, add_masked_tokens
+from .utils import remove_masked_tokens, add_masked_tokens, unpatchify
 from .backbone import BackboneParams, TransformerBackbone
 from .token_mixer import TokenMixer
 import torch
@@ -73,14 +73,14 @@ class ReiMei(nn.Module):
         self.image_embedder = PatchEmbed(self.channels, self.embed_dim, self.patch_size)
         
         # Text embedding
-        self.siglip_embedder = MLPEmbedder(params.siglip_dim, self.embed_dim)
-        self.bert_embedder = MLPEmbedder(params.bert_dim, self.embed_dim)
+        self.siglip_embedder = MLPEmbedder(params.siglip_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=4)
+        self.bert_embedder = MLPEmbedder(params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=4)
 
         # Only bert needs normalization, siglip embeddings are in reasonable range
         self.bert_norm = RMSNorm(params.bert_dim)
 
         # Vector (y) embedding
-        self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim)
+        self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=4)
         
         # TokenMixer
         self.token_mixer = TokenMixer(self.embed_dim, params.num_heads, params.token_mixer_layers, num_experts=params.num_experts, capacity_factor=params.capacity_factor, exp_ratio=params.image_text_expert_ratio)
@@ -109,44 +109,63 @@ class ReiMei(nn.Module):
         s = 1.0 / math.sqrt(self.embed_dim)
 
         # Initialize all linear layers and biases
-        def _basic_init(module):
-            if isinstance(module, nn.LayerNorm):
-                if module.weight is not None:
-                    nn.init.constant_(module.weight, 1.0)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-            elif isinstance(module, nn.Linear):
-                nn.init.normal_(module.weight, std=s)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
+        # def _basic_init(module):
+        #     if isinstance(module, nn.LayerNorm):
+        #         if module.weight is not None:
+        #             nn.init.constant_(module.weight, 1.0)
+        #         if module.bias is not None:
+        #             nn.init.constant_(module.bias, 0)
+        #     elif isinstance(module, nn.Linear):
+        #         nn.init.normal_(module.weight, std=s)
+        #         if module.bias is not None:
+        #             nn.init.constant_(module.bias, 0)
 
-        # Apply basic initialization to all modules
-        self.apply(_basic_init)
+        # Initialize all linear layers and biases
+        # def _basic_init(module):
+        #     if isinstance(module, nn.Linear):
+        #         nn.init.xavier_uniform_(module.weight)
+        #         if module.bias is not None:
+        #             nn.init.constant_(module.bias, 0)
+        #     elif isinstance(module, nn.Conv2d):
+        #         # Initialize convolutional layers like linear layers
+        #         nn.init.xavier_uniform_(module.weight.view(module.weight.size(0), -1))
+        #         if module.bias is not None:
+        #             nn.init.constant_(module.bias, 0)
+        #     elif isinstance(module, nn.LayerNorm):
+        #         # Initialize LayerNorm layers
+        #         if module.weight is not None:
+        #             nn.init.constant_(module.weight, 1.0)
+        #         if module.bias is not None:
+        #             nn.init.constant_(module.bias, 0)
 
-        def _mlp_embedder_init(module):
-            if isinstance(module, MLPEmbedder):
-                # First linear layer: use Kaiming uniform for layers followed by GELU.
-                nn.init.kaiming_uniform_(module.mlp[0].weight)
-                if module.mlp[0].bias is not None:
-                    nn.init.constant_(module.mlp[0].bias, 0)
-                # Second linear layer: use Xavier uniform.
-                nn.init.xavier_uniform_(module.mlp[2].weight)
-                if module.mlp[2].bias is not None:
-                    nn.init.constant_(module.mlp[2].bias, 0)
 
-        self.apply(_mlp_embedder_init)
+        # # Apply basic initialization to all modules
+        # self.apply(_basic_init)
 
-        def _moe_mlp_init(module):
-            if isinstance(module, MoeMLP):
-                nn.init.kaiming_uniform_(module.gate_proj.weight)
-                nn.init.kaiming_uniform_(module.up_proj.weight)
-                nn.init.xavier_uniform_(module.down_proj.weight)
+        # def _mlp_embedder_init(module):
+        #     if isinstance(module, MLPEmbedder):
+        #         # First linear layer: use Kaiming uniform for layers followed by GELU.
+        #         nn.init.xavier_uniform_(module.mlp[0].weight)
+        #         if module.mlp[0].bias is not None:
+        #             nn.init.constant_(module.mlp[0].bias, 0)
+        #         # Second linear layer: use Xavier uniform.
+        #         nn.init.xavier_uniform_(module.mlp[2].weight)
+        #         if module.mlp[2].bias is not None:
+        #             nn.init.constant_(module.mlp[2].bias, 0)
 
-        self.apply(_moe_mlp_init)
+        # self.apply(_mlp_embedder_init)
+
+        # def _moe_mlp_init(module):
+        #     if isinstance(module, MoeMLP):
+        #         nn.init.xavier_uniform_(module.gate_proj.weight)
+        #         nn.init.xavier_uniform_(module.up_proj.weight)
+        #         nn.init.xavier_uniform_(module.down_proj.weight)
+
+        # self.apply(_moe_mlp_init)
 
         # Zero-out the last linear layer in the output to ensure initial predictions are zero
-        nn.init.constant_(self.output_layer.mlp.mlp[2].weight, 0)
-        nn.init.constant_(self.output_layer.mlp.mlp[2].bias, 0)
+        nn.init.constant_(self.output_layer.mlp.mlp[-1].weight, 0)
+        nn.init.constant_(self.output_layer.mlp.mlp[-1].bias, 0)
 
     def forward(self, img, time, sig_txt, sig_vec, bert_txt, bert_vec, mask=None):
         # img: (batch_size, channels, height, width)
@@ -182,6 +201,7 @@ class ReiMei(nn.Module):
 
         # Patch-mixer
         img, txt = self.token_mixer(img, txt, vec, patched_h, patched_w)
+        # img = self.token_mixer(img)
 
         # Remove masked patches
         if mask is not None:
@@ -199,7 +219,8 @@ class ReiMei(nn.Module):
             # (bs, unmasked_num_tokens, in_channels) -> (bs, num_tokens, in_channels)
             img = add_masked_tokens(img, mask)
 
-        img = img.permute(0, 2, 1).contiguous().view(batch_size, channels, height, width).contiguous()
+        # img = img.permute(0, 2, 1).contiguous().view(batch_size, channels, height, width).contiguous()
+        img = unpatchify(img, self.patch_size, height, width)
         
         return img
     
