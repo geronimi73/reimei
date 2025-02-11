@@ -1,6 +1,6 @@
 USERNAME = "SwayStar123"
 # DATASET_NAME = "FFHQ_1024_DC-AE_f32"
-DATASET_NAME = "preprocessed_commoncatalog-cc-by_DCAE"
+DATASET_NAME = "pruned_preprocessed_commoncatalog-cc-by_DCAE"
 # DATASET_NAME = "preprocessed_commoncatalog-cc-by"
 DS_DIR_BASE = "../../datasets"
 MODELS_DIR_BASE = "../../models"
