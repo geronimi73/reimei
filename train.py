@@ -187,8 +187,7 @@ if __name__ == "__main__":
         # bert_emb = torch.zeros(bs, 1, 1024).to(device, dtype=DTYPE)
         # bert_vec = torch.zeros(bs, 1024).to(device, dtype=DTYPE)
 
-        mask = random_mask(bs, latents.shape[-2], latents.shape[-1], patch_size, mask_ratio=MASK_RATIO).to(device, dtype=DTYPE)
-
+        img_mask = random_mask(bs, latents.shape[-2], latents.shape[-1], patch_size, mask_ratio=MASK_RATIO).to(device, dtype=DTYPE)
         cfg_mask = random_mask(bs, 1, 1, (1, 1), CFG_RATIO).to(device, dtype=DTYPE).view(bs)
 
         # Randomly only train on siglip or bert
@@ -203,6 +202,7 @@ if __name__ == "__main__":
             siglip_emb = siglip_emb.to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
             siglip_vec = siglip_vec.to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
 
+        txt_mask = random_mask(bs, siglip_emb.size(1)+bert_emb.size(1), 1, (1, 1), mask_ratio=MASK_RATIO).to(device=device, dtype=DTYPE)
 
         nt = torch.randn((bs,), device=device, dtype=DTYPE)
         t = torch.sigmoid(nt)
@@ -211,14 +211,14 @@ if __name__ == "__main__":
         z = torch.randn_like(latents, device=device, dtype=DTYPE)
         x_t = (1 - texp) * latents + texp * z
 
-        vtheta = model(x_t, t, siglip_emb, siglip_vec, bert_emb, bert_vec, mask)
+        vtheta = model(x_t, t, siglip_emb, siglip_vec, bert_emb, bert_vec, img_mask, txt_mask)
 
         # if batch_idx % 200 == 0:
             # print("vtheta std dev mean", torch.std_mean(vtheta))
 
-        latents = apply_mask_to_tensor(latents, mask, patch_size)
-        vtheta = apply_mask_to_tensor(vtheta, mask, patch_size)
-        z = apply_mask_to_tensor(z, mask, patch_size)
+        latents = apply_mask_to_tensor(latents, img_mask, patch_size)
+        vtheta = apply_mask_to_tensor(vtheta, img_mask, patch_size)
+        z = apply_mask_to_tensor(z, img_mask, patch_size)
 
         v = z - latents
 

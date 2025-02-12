@@ -2,7 +2,7 @@ import math
 import torch.nn as nn
 from torch.nn.modules.normalization import RMSNorm
 from transformer.moedit import MoeMLP
-from .embed import PatchEmbed, sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
+from .embed import PatchEmbed, sincos_1d, sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
 from .utils import remove_masked_tokens, add_masked_tokens, unpatchify
 from .backbone import BackboneParams, TransformerBackbone
 from .token_mixer import TokenMixer
@@ -167,7 +167,7 @@ class ReiMei(nn.Module):
         nn.init.constant_(self.output_layer.mlp.mlp[-1].weight, 0)
         nn.init.constant_(self.output_layer.mlp.mlp[-1].bias, 0)
 
-    def forward(self, img, time, sig_txt, sig_vec, bert_txt, bert_vec, mask=None):
+    def forward(self, img, time, sig_txt, sig_vec, bert_txt, bert_vec, img_mask=None, txt_mask=None):
         # img: (batch_size, channels, height, width)
         # time: (batch_size, 1)
         # sig_txt: (batch_size, seq_len, siglip_dim)
@@ -183,7 +183,9 @@ class ReiMei(nn.Module):
         sig_txt = self.siglip_embedder(sig_txt)
         bert_txt = self.bert_embedder(self.bert_norm(bert_txt))
         txt = torch.cat([sig_txt, bert_txt], dim=1)
-        
+
+        _, seq_len, _ = txt.shape
+
         # Vector embedding (timestep + vector_embeddings)
         time = self.time_embedder(time)
 
@@ -194,30 +196,30 @@ class ReiMei(nn.Module):
         img = self.image_embedder(img)
 
         # (height // patch_size_h, width // patch_size_w, embed_dim)
-        sincos_pos_embed = sincos_2d(self.embed_dim, patched_h, patched_w)
-        sincos_pos_embed = sincos_pos_embed.to(device=img.device, dtype=img.dtype).unsqueeze(0).expand(batch_size, -1, -1)
-        
-        img = img + sincos_pos_embed
+        sincos_2d_pe = sincos_2d(self.embed_dim, patched_h, patched_w)
+        sincos_2d_pe = sincos_2d_pe.to(device=img.device, dtype=img.dtype).unsqueeze(0).expand(batch_size, -1, -1)
+        img = img + sincos_2d_pe
 
-        # Patch-mixer
+        # Token-mixer
         img, txt = self.token_mixer(img, txt, vec, patched_h, patched_w)
-        # img = self.token_mixer(img)
 
         # Remove masked patches
-        if mask is not None:
-            img = remove_masked_tokens(img, mask)
+        if img_mask is not None:
+            img = remove_masked_tokens(img, img_mask)
+        if txt_mask is not None:
+            txt = remove_masked_tokens(txt, txt_mask)
 
         # Backbone transformer model
-        img = self.backbone(img, txt, vec, mask, patched_h, patched_w)
+        img = self.backbone(img, txt, vec, img_mask, patched_h, patched_w)
         
         # Final output layer
         # (bs, unmasked_num_tokens, embed_dim) -> (bs, unmasked_num_tokens, in_channels)
         img = self.output_layer(img, vec)
 
         # Add masked patches
-        if mask is not None:
+        if img_mask is not None:
             # (bs, unmasked_num_tokens, in_channels) -> (bs, num_tokens, in_channels)
-            img = add_masked_tokens(img, mask)
+            img = add_masked_tokens(img, img_mask)
 
         # img = img.permute(0, 2, 1).contiguous().view(batch_size, channels, height, width).contiguous()
         img = unpatchify(img, self.patch_size, height, width)
