@@ -7,4 +7,12 @@
 
 Training and inference code for reimei, a diffusion model for image generation.
 
-Utilizing deferred masking, 64 experts expert choice MoE, the Deep Compression AutoEncoder (DC-AE), and MMDiT blocks from SD3/Flux, trained on a budget of just $15,000.
+Utilizing deferred masking, the Deep Compression AutoEncoder (DC-AE), Moe-MMDiT blocks from SD3/Flux, Siglip and ModernBERT text encoders
+
+
+To run training
+```pip install -r requirements.txt```
+setup accelerate using 
+```accelerate config```
+then
+```accelerate launch```
