@@ -36,17 +36,17 @@ def custom_collate(batch):
 
 
 class ShapeBatchingDataset(IterableDataset):
-    # def __init__(self, hf_dataset, batch_size, siglip_tokenizer, siglip_model, bert_tokenizer, bert_model, device, num_workers, shuffle=True, seed=42, buffer_multiplier=20, ):
-    def __init__(self, hf_dataset, batch_size, device, num_workers, shuffle=True, seed=42, buffer_multiplier=20, ):
+    def __init__(self, hf_dataset, batch_size, siglip_tokenizer, siglip_model, bert_tokenizer, bert_model, device, num_workers, shuffle=True, seed=42, buffer_multiplier=20, ):
+    # def __init__(self, hf_dataset, batch_size, device, num_workers, shuffle=True, seed=42, buffer_multiplier=20, ):
         self.dataset = hf_dataset
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
         self.buffer_multiplier = buffer_multiplier
-        # self.siglip_tokenizer = siglip_tokenizer
-        # self.siglip_model = siglip_model
-        # self.bert_tokenizer = bert_tokenizer
-        # self.bert_model = bert_model
+        self.siglip_tokenizer = siglip_tokenizer
+        self.siglip_model = siglip_model
+        self.bert_tokenizer = bert_tokenizer
+        self.bert_model = bert_model
         self.device = device
         self.num_workers = num_workers
 
@@ -86,19 +86,19 @@ class ShapeBatchingDataset(IterableDataset):
 
 
         # if bool(random.getrandbits(1)):
-        #     siglip_embedding, siglip_vec, bert_embedding, bert_vec= self.encode_siglip(samples["caption"])
+        siglip_embedding, siglip_vec, _, _= self.encode_siglip(samples["caption"])
         # else:
-        #     siglip_embedding, siglip_vec, bert_embedding, bert_vec = self.encode_bert(samples["caption"])
+        _, _, bert_embedding, bert_vec = self.encode_bert(samples["caption"])
 
         batch = {
             'caption': samples["caption"],
             'label': torch.tensor(samples["label"], dtype=torch.int),
             'ae_latent': ae_latent,
             'ae_latent_shape': latent_shape,
-            # 'siglip_emb': siglip_embedding,
-            # 'siglip_vec': siglip_vec,
-            # 'bert_emb': bert_embedding,
-            # 'bert_vec': bert_vec,
+            'siglip_emb': siglip_embedding,
+            'siglip_vec': siglip_vec,
+            'bert_emb': bert_embedding,
+            'bert_vec': bert_vec,
         }
         return batch
 

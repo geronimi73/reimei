@@ -106,13 +106,13 @@ class ReiMei(nn.Module):
         self.bert_embedder = MLPEmbedder(params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
 
         # Label embedding
-        self.embedding_table = LabelEmbedder(params.num_classes, self.embed_dim)
+        # self.embedding_table = LabelEmbedder(params.num_classes, self.embed_dim)
 
         # Only bert needs normalization, siglip embeddings are in reasonable range
         self.bert_norm = RMSNorm(params.bert_dim)
     
         # Vector (y) embedding
-        # self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
+        self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
         
         # TokenMixer
         self.token_mixer = TokenMixer(self.embed_dim, params.num_heads, params.token_mixer_layers, num_experts=params.num_experts, capacity_factor=params.capacity_factor, exp_ratio=params.image_text_expert_ratio, num_shared_experts=params.shared_experts)
@@ -220,9 +220,9 @@ class ReiMei(nn.Module):
         # Vector embedding (timestep + vector_embeddings)
         time = self.time_embedder(time)
 
-        # vec = torch.cat([sig_vec, self.bert_norm(bert_vec)], dim=1)
-        # vec = self.vector_embedder(vec) + time  # (batch_size, embed_dim)
-        vec = self.embedding_table(labels, train, None if cfg else torch.ones(batch_size, device=img.device, dtype=torch.int))  + time  # (batch_size, embed_dim)
+        vec = torch.cat([sig_vec, self.bert_norm(bert_vec)], dim=1)
+        vec = self.vector_embedder(vec) + time  # (batch_size, embed_dim)
+        # vec = self.embedding_table(labels, train, None if cfg else torch.ones(batch_size, device=img.device, dtype=torch.int))  + time  # (batch_size, embed_dim)
 
         # Image embedding
         img = self.image_embedder(img)
@@ -233,8 +233,8 @@ class ReiMei(nn.Module):
         img = img + sincos_2d_pe
 
         # Token-mixer
-        # img, txt = self.token_mixer(img, txt, vec, patched_h, patched_w)
-        img = self.token_mixer(img, vec)
+        img, txt = self.token_mixer(img, txt, vec, patched_h, patched_w)
+        # img = self.token_mixer(img, vec)
 
 
         # Remove masked patches
@@ -244,8 +244,8 @@ class ReiMei(nn.Module):
             txt = remove_masked_tokens(txt, txt_mask)
 
         # Backbone transformer model
-        # img = self.backbone(img, txt, vec, img_mask, patched_h, patched_w)
-        img = self.backbone(img, vec)
+        img = self.backbone(img, txt, vec, img_mask, patched_h, patched_w)
+        # img = self.backbone(img, vec)
 
         
         # Final output layer

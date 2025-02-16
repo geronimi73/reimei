@@ -51,28 +51,28 @@ class TransformerBackbone(nn.Module):
                 n_shared = params.shared_experts
                 n_act = min(params.capacity_factor, float(n_exp))
             
-            self.layers.append(DiTBlock(params.embed_dim, scaled_num_heads, mlp_ratio, 
-                                n_exp, n_act, pretraining_tp=params.pretraining_tp, num_shared_experts=n_shared, attn_drop=params.dropout))
+            # self.layers.append(DiTBlock(params.embed_dim, scaled_num_heads, mlp_ratio, 
+                                # n_exp, n_act, pretraining_tp=params.pretraining_tp, num_shared_experts=n_shared, attn_drop=params.dropout))
 
-            # if i < params.num_layers // 2: # First half uses DoubleStreamBlock
-            #     self.layers.append(DoubleStreamBlock(params.embed_dim, scaled_num_heads, mlp_ratio, 
-            #                                 n_exp, n_act, pretraining_tp=params.pretraining_tp, num_shared_experts=n_shared, dropout=params.dropout, exp_ratio=params.image_text_expert_ratio))
-            # else:  # Second half uses SingleStreamBlock
-            #     self.layers.append(SingleStreamBlock(params.embed_dim, scaled_num_heads, mlp_ratio, 
-            #                                    n_exp, n_act, pretraining_tp=params.pretraining_tp, num_shared_experts=n_shared, dropout=params.dropout))
+            if i < params.num_layers // 2: # First half uses DoubleStreamBlock
+                self.layers.append(DoubleStreamBlock(params.embed_dim, scaled_num_heads, mlp_ratio, 
+                                            n_exp, n_act, pretraining_tp=params.pretraining_tp, num_shared_experts=n_shared, dropout=params.dropout, exp_ratio=params.image_text_expert_ratio))
+            else:  # Second half uses SingleStreamBlock
+                self.layers.append(SingleStreamBlock(params.embed_dim, scaled_num_heads, mlp_ratio, 
+                                               n_exp, n_act, pretraining_tp=params.pretraining_tp, num_shared_experts=n_shared, dropout=params.dropout))
 
 
     def forward(
             self, 
             x,
-            # text, 
+            text, 
             vec, 
-            # mask, 
-            # original_h, 
-            # original_w
+            mask, 
+            original_h, 
+            original_w
             ):
         for layer in self.layers:
-            # x, text = layer(x, text, vec, mask, original_h, original_w)
-            x = layer(x, vec)
+            x, text = layer(x, text, vec, mask, original_h, original_w)
+            # x = layer(x, vec)
 
         return x

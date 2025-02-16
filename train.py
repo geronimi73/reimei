@@ -43,13 +43,13 @@ def get_dataset(bs, seed, device, num_workers=16):
     # ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", split="train", streaming=True)
     ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=num_workers, split="train")
     ds = ds.to_iterable_dataset(1000)
-    # siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device, DTYPE)
-    # siglip_tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
-    # bert_model = ModernBertModel.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert").to(device, DTYPE)
-    # bert_tokenizer = AutoTokenizer.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert")
+    siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device, DTYPE)
+    siglip_tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
+    bert_model = ModernBertModel.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert").to(device, DTYPE)
+    bert_tokenizer = AutoTokenizer.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert")
     
-    ds = ShapeBatchingDataset(ds, bs, device, num_workers, shuffle=True, seed=seed)
-    # ds = ShapeBatchingDataset(ds, bs, siglip_tokenizer, siglip_model, bert_tokenizer, bert_model, device, num_workers, shuffle=True, seed=seed)
+    # ds = ShapeBatchingDataset(ds, bs, device, num_workers, shuffle=True, seed=seed)
+    ds = ShapeBatchingDataset(ds, bs, siglip_tokenizer, siglip_model, bert_tokenizer, bert_model, device, num_workers, shuffle=True, seed=seed)
     return ds
 
 class MemmapDataset(Dataset):
@@ -155,16 +155,14 @@ if __name__ == "__main__":
         del grid, example_ground_truth, example_latents, example_captions
 
         # example_captions = ["a green field with green bushes", "bright blue sky with clouds", "a red apple on a wooden table", "a field of green grass with a snowcapped mountain in the background"]
-        # example_captions = ["a cheeseburger on a black plate and cutlery", "a bright yellow banana on a wodden table", "a white cup on a glass table", "a volcano with a yellow sunset sky"]
-        # ex_sig_emb, ex_sig_vec, ex_bert_emb, ex_bert_vec = dataset.encode(example_captions)
+        example_captions = ["a cheeseburger on a black plate and cutlery", "a bright yellow banana on a wodden table", "a white cup on a glass table", "a volcano with a yellow sunset sky"]
+        ex_sig_emb, ex_sig_vec, ex_bert_emb, ex_bert_vec = dataset.encode(example_captions)
         ex_labels = torch.tensor([933, 954, 968, 980], dtype=torch.int).to(device)
         
-        ex_sig_emb = torch.zeros(4, 1, 1152).to(device, dtype=DTYPE)
-        ex_sig_vec = torch.zeros(4, 1152).to(device, dtype=DTYPE)
-        ex_bert_emb = torch.zeros(4, 1, 1024).to(device, dtype=DTYPE)
-        ex_bert_vec = torch.zeros(4, 1024).to(device, dtype=DTYPE)
-
-
+        # ex_sig_emb = torch.zeros(4, 1, 1152).to(device, dtype=DTYPE)
+        # ex_sig_vec = torch.zeros(4, 1152).to(device, dtype=DTYPE)
+        # ex_bert_emb = torch.zeros(4, 1, 1024).to(device, dtype=DTYPE)
+        # ex_bert_vec = torch.zeros(4, 1024).to(device, dtype=DTYPE)
 
         ae = ae.to("cpu")
         losses = []
@@ -182,18 +180,18 @@ if __name__ == "__main__":
         # if batch_idx % 200 == 0:
             # print("Batch Latents std dev mean", torch.std_mean(latents))
 
-        siglip_emb = torch.zeros(bs, 1, 1152).to(device, dtype=DTYPE)
-        siglip_vec = torch.zeros(bs, 1152).to(device, dtype=DTYPE)
-        bert_emb = torch.zeros(bs, 1, 1024).to(device, dtype=DTYPE)
-        bert_vec = torch.zeros(bs, 1024).to(device, dtype=DTYPE)
+        # siglip_emb = torch.zeros(bs, 1, 1152).to(device, dtype=DTYPE)
+        # siglip_vec = torch.zeros(bs, 1152).to(device, dtype=DTYPE)
+        # bert_emb = torch.zeros(bs, 1, 1024).to(device, dtype=DTYPE)
+        # bert_vec = torch.zeros(bs, 1024).to(device, dtype=DTYPE)
 
         img_mask = random_mask(bs, latents.shape[-2], latents.shape[-1], patch_size, mask_ratio=MASK_RATIO).to(device, dtype=DTYPE)
         cfg_mask = random_mask(bs, 1, 1, (1, 1), CFG_RATIO).to(device, dtype=DTYPE).view(bs)
 
-        # siglip_emb = batch["siglip_emb"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
-        # siglip_vec = batch["siglip_vec"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
-        # bert_emb = batch["bert_emb"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
-        # bert_vec = batch["bert_vec"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
+        siglip_emb = batch["siglip_emb"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
+        siglip_vec = batch["siglip_vec"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
+        bert_emb = batch["bert_emb"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
+        bert_vec = batch["bert_vec"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
         labels = batch["label"].to(device)
 
         txt_mask = random_mask(bs, siglip_emb.size(1)+bert_emb.size(1), 1, (1, 1), mask_ratio=MASK_RATIO).to(device=device, dtype=DTYPE)
