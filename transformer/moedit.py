@@ -49,7 +49,7 @@ class MoeMLP(nn.Module):
 
         return down_proj
 
-class EC_DiTMoEGate(nn.Module):
+class EC_MoEGate(nn.Module):
     """
     Expert-Choice gating without auxiliary loss.
     Each expert will pick the top-C tokens, where
@@ -97,7 +97,7 @@ class EC_DiTMoEGate(nn.Module):
 
         return topk_idx, topk_weight
 
-class SparseMoeBlock(nn.Module):
+class EC_SparseMoeBlock(nn.Module):
     """
     Expert-Choice sparse MoE block with no auxiliary load-balancing loss.
     """
@@ -125,7 +125,7 @@ class SparseMoeBlock(nn.Module):
         ])
 
         # Our updated gate with no aux loss
-        self.gate = EC_DiTMoEGate(
+        self.gate = EC_MoEGate(
             embed_dim=embed_dim,
             num_experts=num_experts,
             f_c=f_c
@@ -184,7 +184,146 @@ class SparseMoeBlock(nn.Module):
 
         return out
 
+### Token choice
+class TC_MoEGate(nn.Module):
+    def __init__(self, embed_dim, num_experts=16, num_experts_per_tok=2, aux_loss_alpha=0.01):
+        super().__init__()
+        self.top_k = num_experts_per_tok
+        self.n_routed_experts = num_experts
 
+        self.scoring_func = 'softmax'
+        self.alpha = aux_loss_alpha
+        self.seq_aux = False
+
+        # topk selection algorithm
+        self.norm_topk_prob = False
+        self.gating_dim = embed_dim
+        self.weight = nn.Parameter(torch.empty((self.n_routed_experts, self.gating_dim)))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        import torch.nn.init  as init
+        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+    
+    def forward(self, hidden_states):
+        bsz, seq_len, h = hidden_states.shape    
+        # print(bsz, seq_len, h)    
+        ### compute gating score
+        hidden_states = hidden_states.view(-1, h)
+        logits = F.linear(hidden_states, self.weight, None)
+        if self.scoring_func == 'softmax':
+            scores = logits.softmax(dim=-1)
+        else:
+            raise NotImplementedError(f'insupportable scoring function for MoE gating: {self.scoring_func}')
+        
+        ### select top-k experts
+        topk_weight, topk_idx = torch.topk(scores, k=self.top_k, dim=-1, sorted=False)
+        
+        ### norm gate to sum 1
+        if self.top_k > 1 and self.norm_topk_prob:
+            denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
+            topk_weight = topk_weight / denominator
+
+        ### expert-level computation auxiliary loss
+        if self.training and self.alpha > 0.0:
+            scores_for_aux = scores
+            aux_topk = self.top_k
+            # always compute aux loss based on the naive greedy topk method
+            topk_idx_for_aux_loss = topk_idx.view(bsz, -1)
+            if self.seq_aux:
+                scores_for_seq_aux = scores_for_aux.view(bsz, seq_len, -1)
+                ce = torch.zeros(bsz, self.n_routed_experts, device=hidden_states.device)
+                ce.scatter_add_(1, topk_idx_for_aux_loss, torch.ones(bsz, seq_len * aux_topk, device=hidden_states.device)).div_(seq_len * aux_topk / self.n_routed_experts)
+                aux_loss = (ce * scores_for_seq_aux.mean(dim = 1)).sum(dim = 1).mean() * self.alpha
+            else:
+                mask_ce = F.one_hot(topk_idx_for_aux_loss.view(-1), num_classes=self.n_routed_experts)
+                ce = mask_ce.float().mean(0)
+                Pi = scores_for_aux.mean(0)
+                fi = ce * self.n_routed_experts
+                aux_loss = (Pi * fi).sum() * self.alpha
+        else:
+            aux_loss = None
+        return topk_idx, topk_weight, aux_loss
+
+class AddAuxiliaryLoss(torch.autograd.Function):
+    """
+    The trick function of adding auxiliary (aux) loss, 
+    which includes the gradient of the aux loss during backpropagation.
+    """
+    @staticmethod
+    def forward(ctx, x, loss):
+        assert loss.numel() == 1
+        ctx.dtype = loss.dtype
+        ctx.required_aux_loss = loss.requires_grad
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_loss = None
+        if ctx.required_aux_loss:
+            grad_loss = torch.ones(1, dtype=ctx.dtype, device=grad_output.device)
+        return grad_output, grad_loss
+
+class TC_SparseMoeBlock(nn.Module):
+    """
+    A mixed expert module containing shared experts.
+    """
+    def __init__(self, embed_dim, mlp_ratio=4, num_experts=16, num_experts_per_tok=2, pretraining_tp=2, num_shared_experts=2):
+        super().__init__()
+        self.num_experts_per_tok = num_experts_per_tok
+        self.experts = nn.ModuleList([MoeMLP(hidden_size = embed_dim, intermediate_size = mlp_ratio * embed_dim, pretraining_tp=pretraining_tp) for i in range(num_experts)])
+        self.gate = TC_MoEGate(embed_dim=embed_dim, num_experts=num_experts, num_experts_per_tok=num_experts_per_tok)
+        self.n_shared_experts = num_shared_experts
+        
+        if self.n_shared_experts is not None:
+            intermediate_size =  embed_dim * self.n_shared_experts
+            self.shared_experts = MoeMLP(hidden_size = embed_dim, intermediate_size = intermediate_size, pretraining_tp=pretraining_tp)
+    
+    def forward(self, hidden_states):
+        identity = hidden_states
+        orig_shape = hidden_states.shape
+        topk_idx, topk_weight, aux_loss = self.gate(hidden_states) 
+        # print(topk_idx.tolist(), print(len(topk_idx.tolist()))) 
+        # global selected_ids_list
+        # selected_ids_list.append(topk_idx.tolist())
+
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+        flat_topk_idx = topk_idx.view(-1)
+        if self.training:
+            hidden_states = hidden_states.repeat_interleave(self.num_experts_per_tok, dim=0)
+            y = torch.empty_like(hidden_states, dtype=hidden_states.dtype)
+            for i, expert in enumerate(self.experts): 
+                y[flat_topk_idx == i] = expert(hidden_states[flat_topk_idx == i])
+            y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
+            y =  y.view(*orig_shape)
+            y = AddAuxiliaryLoss.apply(y, aux_loss)
+        else:
+            y = self.moe_infer(hidden_states, flat_topk_idx, topk_weight.view(-1, 1)).view(*orig_shape)
+        if self.n_shared_experts is not None:
+            y = y + self.shared_experts(identity)
+        return y
+    
+
+    @torch.no_grad()
+    def moe_infer(self, x, flat_expert_indices, flat_expert_weights):
+        expert_cache = torch.zeros_like(x) 
+        idxs = flat_expert_indices.argsort()
+        tokens_per_expert = flat_expert_indices.bincount().cpu().numpy().cumsum(0)
+        token_idxs = idxs // self.num_experts_per_tok 
+        for i, end_idx in enumerate(tokens_per_expert):
+            start_idx = 0 if i == 0 else tokens_per_expert[i-1]
+            if start_idx == end_idx:
+                continue
+            expert = self.experts[i]
+            exp_token_idx = token_idxs[start_idx:end_idx]
+            expert_tokens = x[exp_token_idx]
+            expert_out = expert(expert_tokens)
+            expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]]) 
+            
+            # for fp16 and other dtype
+            expert_cache = expert_cache.to(expert_out.dtype)
+            expert_cache.scatter_reduce_(0, exp_token_idx.view(-1, 1).repeat(1, x.shape[-1]), expert_out, reduce='sum')
+        return expert_cache
 
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int):
@@ -256,6 +395,39 @@ def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, dropout=0.0) ->
 #################################################################################
 #                                 Core DiT Modules                              #
 #################################################################################
+from timm.models.vision_transformer import Attention
+
+def modulate(x, shift, scale):
+    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
+class DiTBlock(nn.Module):
+    """
+    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
+    """
+    def __init__(
+        self, hidden_size, num_heads, mlp_ratio=4,
+        num_experts=8, num_experts_per_tok=2, pretraining_tp=2, num_shared_experts=2, **block_kwargs
+    ):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+
+        self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        # mlp_hidden_dim = int(hidden_size * mlp_ratio)
+        # approx_gelu = lambda: nn.GELU(approximate="tanh")
+        # self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0) 
+        self.moe = TC_SparseMoeBlock(hidden_size, mlp_ratio, num_experts, int(num_experts_per_tok), pretraining_tp, num_shared_experts=num_shared_experts)
+
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+        )
+
+    def forward(self, x, c):
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa)) 
+        x = x + gate_mlp.unsqueeze(1) * self.moe(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        return x
 
 class DoubleStreamBlock(nn.Module):
     """
@@ -272,13 +444,16 @@ class DoubleStreamBlock(nn.Module):
         pretraining_tp=2,
         num_shared_experts=2,
         dropout: float = 0.1,
-        exp_ratio: int = 4
+        exp_ratio: int = 4,
+        use_expert_choice: bool = False,
+        use_rope: bool = False,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
         self.dropout = dropout
+        self.use_rope = use_rope
 
         # Norm + SelfAttention for image
         self.img_mod = Modulation(hidden_size, double=True)
@@ -299,14 +474,23 @@ class DoubleStreamBlock(nn.Module):
         self.txt_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
         text_exps = max(1, num_experts // exp_ratio)
-        text_capacity = min(float(text_exps), capacity_factor)
+        if use_expert_choice:
+            text_capacity = min(float(text_exps), float(capacity_factor))
 
-        self.img_moe = SparseMoeBlock(
-            hidden_size, mlp_ratio, num_experts, capacity_factor, pretraining_tp, num_shared_experts
-        )
-        self.txt_moe = SparseMoeBlock(
-            hidden_size, mlp_ratio, text_exps, text_capacity, pretraining_tp, num_shared_experts
-        )
+            self.img_moe = EC_SparseMoeBlock(
+                hidden_size, mlp_ratio, num_experts, float(capacity_factor), pretraining_tp, num_shared_experts
+            )
+            self.txt_moe = EC_SparseMoeBlock(
+                hidden_size, mlp_ratio, text_exps, text_capacity, pretraining_tp, num_shared_experts
+            )
+        else:
+            text_capacity = min(int(text_exps), int(capacity_factor))
+            self.img_moe = TC_SparseMoeBlock(
+                hidden_size, mlp_ratio, num_experts, int(capacity_factor), pretraining_tp, num_shared_experts
+            )
+            self.txt_moe = TC_SparseMoeBlock(
+                hidden_size, mlp_ratio, text_exps, text_capacity, pretraining_tp, num_shared_experts
+            )
 
     def forward(
         self,
@@ -326,17 +510,18 @@ class DoubleStreamBlock(nn.Module):
         """
         B, L_txt, _ = txt.shape
 
-        # (seq_len, pos_emb_dim)
-        txt_rope = rope_1d(self.head_dim, L_txt)
-        # (batch_size, seq_len, pos_emb_dim)
-        txt_rope = txt_rope.unsqueeze(0).repeat(B, 1, 1).to(img.device)
+        if self.use_rope:
+            # (seq_len, pos_emb_dim)
+            txt_rope = rope_1d(self.head_dim, L_txt)
+            # (batch_size, seq_len, pos_emb_dim)
+            txt_rope = txt_rope.unsqueeze(0).repeat(B, 1, 1).to(img.device)
 
-        # (height, width, embed_dim)
-        img_rope = rope_2d(self.head_dim, h, w)
-        # (batch_size, height*width, pos_emb_dim)
-        img_rope = img_rope.unsqueeze(0).repeat(B, 1, 1).to(img.device)
-        if mask is not None:
-            img_rope = remove_masked_tokens(img_rope, mask)
+            # (height, width, embed_dim)
+            img_rope = rope_2d(self.head_dim, h, w)
+            # (batch_size, height*width, pos_emb_dim)
+            img_rope = img_rope.unsqueeze(0).repeat(B, 1, 1).to(img.device)
+            if mask is not None:
+                img_rope = remove_masked_tokens(img_rope, mask)
 
         # 1) modulate image
         img_mod1, img_mod2 = self.img_mod(vec)  
@@ -348,8 +533,10 @@ class DoubleStreamBlock(nn.Module):
         img_q, img_k, img_v = rearrange(img_qkv, "B L (three H D) -> three B H L D", three=3, H=self.num_heads)
         # QK-norm
         img_q, img_k = self.img_qk_norm(img_q, img_k, img_v)
-        # apply 2D rope => shape [B, L_img, hidden_size]
-        img_q, img_k = rotary_multiply_2d(img_q, img_k, img_rope)
+
+        if self.use_rope:
+            # apply 2D rope => shape [B, L_img, hidden_size]
+            img_q, img_k = rotary_multiply_2d(img_q, img_k, img_rope)
 
         # 3) modulate text
         txt_mod1, txt_mod2 = self.txt_mod(vec)  
@@ -360,8 +547,10 @@ class DoubleStreamBlock(nn.Module):
         txt_qkv = self.txt_qkv(txt_in) 
         txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (three H D) -> three B H L D", three=3, H=self.num_heads)
         txt_q, txt_k = self.txt_qk_norm(txt_q, txt_k, txt_v)
-        # apply 1D rope
-        txt_q, txt_k = rotary_multiply_1d(txt_q, txt_k, txt_rope)
+
+        if self.use_rope:
+            # apply 1D rope
+            txt_q, txt_k = rotary_multiply_1d(txt_q, txt_k, txt_rope)
 
         # 5) joint attention
         # Cat along the L dimension
@@ -408,12 +597,15 @@ class SingleStreamBlock(nn.Module):
         pretraining_tp: int = 2,
         num_shared_experts: int = 2,
         dropout: float = 0.1,
+        use_expert_choice: bool = False,
+        use_rope: bool = False,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
         self.dropout = dropout
+        self.use_rope = use_rope
 
         # Modulation with "double=True" so we get two sets (mod1, mod2)
         #   - typically one set is used for the attn skip-connection
@@ -430,14 +622,25 @@ class SingleStreamBlock(nn.Module):
 
         # Second norm and sparse MoE, replacing what was originally an MLP
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.moe = SparseMoeBlock(
-            hidden_size,
-            mlp_ratio,
-            num_experts,
-            capacity_factor,
-            pretraining_tp,
-            num_shared_experts,
-        )
+
+        if use_expert_choice:
+            self.moe = EC_SparseMoeBlock(
+                hidden_size,
+                mlp_ratio,
+                num_experts,
+                float(capacity_factor),
+                pretraining_tp,
+                num_shared_experts,
+            )
+        else:
+            self.moe = TC_SparseMoeBlock(
+                hidden_size,
+                mlp_ratio,
+                num_experts,
+                int(capacity_factor),
+                pretraining_tp,
+                num_shared_experts,
+            )
 
     def forward(
         self,
@@ -451,15 +654,16 @@ class SingleStreamBlock(nn.Module):
         B, L_txt, _ = txt.shape
         _, L_img, _ = img.shape
 
-        # 1) Prepare text RoPE (1D)
-        rope_txt = rope_1d(self.head_dim, L_txt)  # [L_txt, d]
-        rope_txt = rope_txt.unsqueeze(0).repeat(B, 1, 1).to(txt.device)
+        if self.use_rope:
+            # 1) Prepare text RoPE (1D)
+            rope_txt = rope_1d(self.head_dim, L_txt)  # [L_txt, d]
+            rope_txt = rope_txt.unsqueeze(0).repeat(B, 1, 1).to(txt.device)
 
-        # 2) Prepare image RoPE (2D)
-        rope_img = rope_2d(self.head_dim, h, w)   # [L_img, d], flattened from (h*w)
-        rope_img = rope_img.unsqueeze(0).repeat(B, 1, 1).to(img.device)
-        if mask is not None:
-            rope_img = remove_masked_tokens(rope_img, mask)
+            # 2) Prepare image RoPE (2D)
+            rope_img = rope_2d(self.head_dim, h, w)   # [L_img, d], flattened from (h*w)
+            rope_img = rope_img.unsqueeze(0).repeat(B, 1, 1).to(img.device)
+            if mask is not None:
+                rope_img = remove_masked_tokens(rope_img, mask)
 
         # 3) modulation parameters => "double=True" => mod1, mod2
         mod1, mod2 = self.modulation(vec)
@@ -472,8 +676,10 @@ class SingleStreamBlock(nn.Module):
             txt_qkv, "B L (three H D) -> three B H L D", three=3, H=self.num_heads
         )
         txt_q, txt_k = self.qk_norm(txt_q, txt_k, txt_v)
-        # Apply 1D RoPE
-        txt_q, txt_k = rotary_multiply_1d(txt_q, txt_k, rope_txt)
+
+        if self.use_rope:
+            # Apply 1D RoPE
+            txt_q, txt_k = rotary_multiply_1d(txt_q, txt_k, rope_txt)
 
         # ---- IMAGE branch ----
         img_in = self.norm(img)
@@ -483,8 +689,10 @@ class SingleStreamBlock(nn.Module):
             img_qkv, "B L (three H D) -> three B H L D", three=3, H=self.num_heads
         )
         img_q, img_k = self.qk_norm(img_q, img_k, img_v)
-        # Apply 2D RoPE
-        img_q, img_k = rotary_multiply_2d(img_q, img_k, rope_img)
+
+        if self.use_rope:
+            # Apply 2D RoPE
+            img_q, img_k = rotary_multiply_2d(img_q, img_k, rope_img)
 
         # ---- Single-stream attention: concat txt + img ----
         q = torch.cat([txt_q, img_q], dim=2)  # [B, H, (L_txt+L_img), D]

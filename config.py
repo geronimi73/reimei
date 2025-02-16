@@ -1,21 +1,23 @@
 USERNAME = "SwayStar123"
 # DATASET_NAME = "FFHQ_1024_DC-AE_f32"
-DATASET_NAME = "pruned_preprocessed_commoncatalog-cc-by_DCAE"
+# DATASET_NAME = "pruned_preprocessed_commoncatalog-cc-by_DCAE"
 # DATASET_NAME = "preprocessed_commoncatalog-cc-by"
+DATASET_NAME = "imagenet_288_dcae_fp8_captions"
 DS_DIR_BASE = "../../datasets"
 MODELS_DIR_BASE = "../../models"
-AE_SCALING_FACTOR = 0.4552
+AE_SCALING_FACTOR = 0.41407
 
-BS = 16
-TRAIN_STEPS = 10000
+BS = 32
+TRAIN_STEPS = 100000
 MASK_RATIO = 0.75
-CFG_RATIO = 0.02
+CFG_RATIO = 0.98
 SEED = 42
 
 LR = 0.0001
 
 # AE_HF_NAME = "madebyollin/sdxl-vae-fp16-fix"
-AE_HF_NAME = "dc-ae-f32c32-mix-1.0-diffusers"
+# AE_HF_NAME = "dc-ae-f32c32-mix-1.0-diffusers"
+AE_HF_NAME = "dc-ae-f32c32-sana-1.1-diffusers"
 AE_CHANNELS = 32
 SIGLIP_HF_NAME = "google/siglip-so400m-patch14-384"
 SIGLIP_EMBED_DIM = 1152

@@ -107,22 +107,25 @@ def sincos_1d(embed_dim, pos):
 class MLPEmbedder(nn.Module):
     def __init__(self, in_dim: int, out_dim: int, hidden_dim: Optional[int] = None, num_layers: int = 2):
         super().__init__()
-        layers = max(num_layers, 2)
-        
-        if hidden_dim is None:
-            hidden_dim = max(in_dim, out_dim)
-        
-        mlp_layers = []
-        mlp_layers.append(nn.Linear(in_dim, hidden_dim, bias=True))
-        mlp_layers.append(nn.GELU())
-        
-        for _ in range(layers - 2):
-            mlp_layers.append(nn.Linear(hidden_dim, hidden_dim, bias=True))
-            mlp_layers.append(nn.GELU())
+        layers = max(num_layers, 1)
 
-        mlp_layers.append(nn.Linear(hidden_dim, out_dim, bias=True))
-        
-        self.mlp = nn.Sequential(*mlp_layers)
+        if layers == 1:
+            self.mlp = nn.Linear(in_dim, out_dim, bias=True)
+        else:
+            if hidden_dim is None:
+                hidden_dim = max(in_dim, out_dim)
+            
+            mlp_layers = []
+            mlp_layers.append(nn.Linear(in_dim, hidden_dim, bias=True))
+            mlp_layers.append(nn.GELU())
+            
+            for _ in range(layers - 2):
+                mlp_layers.append(nn.Linear(hidden_dim, hidden_dim, bias=True))
+                mlp_layers.append(nn.GELU())
+
+            mlp_layers.append(nn.Linear(hidden_dim, out_dim, bias=True))
+            
+            self.mlp = nn.Sequential(*mlp_layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)

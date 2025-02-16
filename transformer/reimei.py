@@ -17,9 +17,9 @@ class ReiMeiParameters:
     embed_dim: int
     num_layers: int
     num_heads: int
-    mlp_dim: int
     siglip_dim: int
     bert_dim: int
+    num_classes: int = 1000
     num_experts: int = 4
     capacity_factor: float = 2.0
     shared_experts: int = 2
@@ -27,6 +27,35 @@ class ReiMeiParameters:
     token_mixer_layers: int = 2
     image_text_expert_ratio: int = 4
     # m_d: float = 1.0
+
+class LabelEmbedder(nn.Module):
+    """
+    Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
+    """
+    def __init__(self, num_classes, hidden_size, dropout_prob=0.1):
+        super().__init__()
+        use_cfg_embedding = dropout_prob > 0
+        self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
+        self.num_classes = num_classes
+        self.dropout_prob = dropout_prob
+
+    def token_drop(self, labels, force_drop_ids=None):
+        """
+        Drops labels to enable classifier-free guidance.
+        """
+        if force_drop_ids is None:
+            drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
+        else:
+            drop_ids = force_drop_ids == 1
+        labels = torch.where(drop_ids, self.num_classes, labels)
+        return labels
+
+    def forward(self, labels, train, force_drop_ids=None):
+        use_dropout = self.dropout_prob > 0
+        if (train and use_dropout) or (force_drop_ids is not None):
+            labels = self.token_drop(labels, force_drop_ids)
+        embeddings = self.embedding_table(labels)
+        return embeddings
 
 class ReiMei(nn.Module):
     """
@@ -73,24 +102,26 @@ class ReiMei(nn.Module):
         self.image_embedder = PatchEmbed(self.channels, self.embed_dim, self.patch_size)
         
         # Text embedding
-        self.siglip_embedder = MLPEmbedder(params.siglip_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=4)
-        self.bert_embedder = MLPEmbedder(params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=4)
+        self.siglip_embedder = MLPEmbedder(params.siglip_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
+        self.bert_embedder = MLPEmbedder(params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
+
+        # Label embedding
+        self.embedding_table = LabelEmbedder(params.num_classes, self.embed_dim)
 
         # Only bert needs normalization, siglip embeddings are in reasonable range
         self.bert_norm = RMSNorm(params.bert_dim)
-
+    
         # Vector (y) embedding
-        self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=4)
+        # self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
         
         # TokenMixer
-        self.token_mixer = TokenMixer(self.embed_dim, params.num_heads, params.token_mixer_layers, num_experts=params.num_experts, capacity_factor=params.capacity_factor, exp_ratio=params.image_text_expert_ratio)
+        self.token_mixer = TokenMixer(self.embed_dim, params.num_heads, params.token_mixer_layers, num_experts=params.num_experts, capacity_factor=params.capacity_factor, exp_ratio=params.image_text_expert_ratio, num_shared_experts=params.shared_experts)
 
         backbone_params = BackboneParams(
             input_dim=self.channels,
             embed_dim=self.embed_dim,
             num_layers=params.num_layers,
             num_heads=params.num_heads,
-            mlp_dim=params.mlp_dim,
             num_experts=params.num_experts,
             capacity_factor=params.capacity_factor,
             shared_experts=params.shared_experts,
@@ -167,7 +198,7 @@ class ReiMei(nn.Module):
         nn.init.constant_(self.output_layer.mlp.mlp[-1].weight, 0)
         nn.init.constant_(self.output_layer.mlp.mlp[-1].bias, 0)
 
-    def forward(self, img, time, sig_txt, sig_vec, bert_txt, bert_vec, img_mask=None, txt_mask=None):
+    def forward(self, img, time, sig_txt, sig_vec, bert_txt, bert_vec, labels, img_mask=None, txt_mask=None, train=True, cfg=False):
         # img: (batch_size, channels, height, width)
         # time: (batch_size, 1)
         # sig_txt: (batch_size, seq_len, siglip_dim)
@@ -189,8 +220,9 @@ class ReiMei(nn.Module):
         # Vector embedding (timestep + vector_embeddings)
         time = self.time_embedder(time)
 
-        vec = torch.cat([sig_vec, self.bert_norm(bert_vec)], dim=1)
-        vec = self.vector_embedder(vec) + time  # (batch_size, embed_dim)
+        # vec = torch.cat([sig_vec, self.bert_norm(bert_vec)], dim=1)
+        # vec = self.vector_embedder(vec) + time  # (batch_size, embed_dim)
+        vec = self.embedding_table(labels, train, None if cfg else torch.ones(batch_size, device=img.device, dtype=torch.int))  + time  # (batch_size, embed_dim)
 
         # Image embedding
         img = self.image_embedder(img)
@@ -201,7 +233,9 @@ class ReiMei(nn.Module):
         img = img + sincos_2d_pe
 
         # Token-mixer
-        img, txt = self.token_mixer(img, txt, vec, patched_h, patched_w)
+        # img, txt = self.token_mixer(img, txt, vec, patched_h, patched_w)
+        img = self.token_mixer(img, vec)
+
 
         # Remove masked patches
         if img_mask is not None:
@@ -210,7 +244,9 @@ class ReiMei(nn.Module):
             txt = remove_masked_tokens(txt, txt_mask)
 
         # Backbone transformer model
-        img = self.backbone(img, txt, vec, img_mask, patched_h, patched_w)
+        # img = self.backbone(img, txt, vec, img_mask, patched_h, patched_w)
+        img = self.backbone(img, vec)
+
         
         # Final output layer
         # (bs, unmasked_num_tokens, embed_dim) -> (bs, unmasked_num_tokens, in_channels)
@@ -227,7 +263,7 @@ class ReiMei(nn.Module):
         return img
     
     @torch.no_grad()
-    def sample(self, z, sig_emb, sig_vec, bert_emb, bert_vec, sample_steps=50, cfg=3.0):
+    def sample(self, z, sig_emb, sig_vec, bert_emb, bert_vec, labels, sample_steps=50, cfg=3.0):
         b = z.size(0)
         dt = 1.0 / sample_steps
         dt = torch.tensor([dt] * b).to(z.device, torch.bfloat16).view([b, *([1] * len(z.shape[1:]))])
@@ -237,13 +273,13 @@ class ReiMei(nn.Module):
             t = i / sample_steps
             t = torch.tensor([t] * b).to(z.device, torch.bfloat16)
 
-            vc = self(z, t, sig_emb, sig_vec, bert_emb, bert_vec, None).to(torch.bfloat16)
+            vc = self(z, t, sig_emb, sig_vec, bert_emb, bert_vec, labels, None, None, False, False).to(torch.bfloat16)
             if cfg != 1.0:
                 null_sig_emb = torch.zeros_like(sig_emb)
                 null_sig_vec = torch.zeros_like(sig_vec)
                 null_bert_emb = torch.zeros_like(bert_emb)
                 null_bert_vec = torch.zeros_like(bert_vec)
-                vu = self(z, t, null_sig_emb, null_sig_vec, null_bert_emb, null_bert_vec, None)
+                vu = self(z, t, null_sig_emb, null_sig_vec, null_bert_emb, null_bert_vec, labels, None, None, False, True)
                 vc = vu + cfg * (vc - vu)
 
             z = z - dt * vc
