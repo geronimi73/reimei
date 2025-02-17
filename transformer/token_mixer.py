@@ -69,15 +69,13 @@ class TokenMixer(nn.Module):
         img: torch.Tensor,       # [B, L_img, embed_dim]
         txt: torch.Tensor,       # [B, L_txt, embed_dim]
         vec: torch.Tensor,       # [B, embed_dim]
-        img_rope: torch.Tensor,
-        txt_rope: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Passes (img, txt) through each DiTBlock in sequence. Each DiTBlock performs
         cross-attention over the concatenation of (img, txt), plus MoE-based feedforwards.
         """
         for layer in self.layers:
-            img, txt = layer(img, txt, vec, img_rope, txt_rope)
+            img, txt = layer(img, txt, vec)
             # img = layer(img, vec)
         return img, txt
         # return img

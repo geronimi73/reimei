@@ -94,12 +94,10 @@ class TransformerBackbone(nn.Module):
             x: torch.Tensor,
             text: torch.Tensor,
             vec: torch.Tensor,
-            img_rope: torch.Tensor,
-            txt_rope: torch.Tensor,
             ):
         for layer in self.layers:
             if self.use_mmdit:
-                x, text = layer(x, text, vec, img_rope, txt_rope)
+                x, text = layer(x, text, vec)
             else:
                 x = layer(x, vec)
 
