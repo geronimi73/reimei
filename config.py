@@ -8,9 +8,9 @@ MODELS_DIR_BASE = "../../models"
 AE_SCALING_FACTOR = 0.41407
 
 BS = 32
-TRAIN_STEPS = 100000
-MASK_RATIO = 0.75
-CFG_RATIO = 0.9
+TRAIN_STEPS = 100_000
+MASK_RATIO = 0.75 # Percent to mask
+CFG_RATIO = 0.95 # Percent to not drop
 SEED = 42
 
 LR = 0.0001

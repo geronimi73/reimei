@@ -446,14 +446,12 @@ class DoubleStreamBlock(nn.Module):
         dropout: float = 0.1,
         exp_ratio: int = 4,
         use_expert_choice: bool = False,
-        use_rope: bool = True,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
         self.dropout = dropout
-        self.use_rope = use_rope
 
         # Norm + SelfAttention for image
         self.img_mod = Modulation(hidden_size, double=True)
@@ -497,8 +495,6 @@ class DoubleStreamBlock(nn.Module):
         img: torch.Tensor,          # [B, L_img, hidden_size]
         txt: torch.Tensor,          # [B, L_txt, hidden_size]
         vec: torch.Tensor,          # conditioning vector => Modulation
-        img_rope: torch.Tensor,
-        txt_rope: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns updated (img, txt).
@@ -520,10 +516,6 @@ class DoubleStreamBlock(nn.Module):
         # QK-norm
         img_q, img_k = self.img_qk_norm(img_q, img_k, img_v)
 
-        if self.use_rope:
-            # apply 2D rope => shape [B, L_img, hidden_size]
-            img_q, img_k = rotary_multiply_2d(img_q, img_k, img_rope)
-
         # 3) modulate text
         txt_mod1, txt_mod2 = self.txt_mod(vec)  
         txt_in = self.txt_norm1(txt)
@@ -533,10 +525,6 @@ class DoubleStreamBlock(nn.Module):
         txt_qkv = self.txt_qkv(txt_in) 
         txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (three H D) -> three B H L D", three=3, H=self.num_heads)
         txt_q, txt_k = self.txt_qk_norm(txt_q, txt_k, txt_v)
-
-        if self.use_rope:
-            # apply 1D rope
-            txt_q, txt_k = rotary_multiply_1d(txt_q, txt_k, txt_rope)
 
         # 5) joint attention
         # Cat along the L dimension
@@ -584,14 +572,12 @@ class SingleStreamBlock(nn.Module):
         num_shared_experts: int = 2,
         dropout: float = 0.1,
         use_expert_choice: bool = False,
-        use_rope: bool = True,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
         self.dropout = dropout
-        self.use_rope = use_rope
 
         # Modulation with "double=True" so we get two sets (mod1, mod2)
         #   - typically one set is used for the attn skip-connection
@@ -633,8 +619,6 @@ class SingleStreamBlock(nn.Module):
         img: torch.Tensor,   # [B, L_img, hidden_size]
         txt: torch.Tensor,   # [B, L_txt, hidden_size]
         vec: torch.Tensor,   # conditioning vector => for Modulation
-        img_rope: torch.Tensor,
-        txt_rope: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         B, L_txt, _ = txt.shape
         _, L_img, _ = img.shape
@@ -651,10 +635,6 @@ class SingleStreamBlock(nn.Module):
         )
         txt_q, txt_k = self.qk_norm(txt_q, txt_k, txt_v)
 
-        if self.use_rope:
-            # Apply 1D RoPE
-            txt_q, txt_k = rotary_multiply_1d(txt_q, txt_k, txt_rope)
-
         # ---- IMAGE branch ----
         img_in = self.norm(img)
         img_in = (1 + mod1.scale) * img_in + mod1.shift
@@ -663,10 +643,6 @@ class SingleStreamBlock(nn.Module):
             img_qkv, "B L (three H D) -> three B H L D", three=3, H=self.num_heads
         )
         img_q, img_k = self.qk_norm(img_q, img_k, img_v)
-
-        if self.use_rope:
-            # Apply 2D RoPE
-            img_q, img_k = rotary_multiply_2d(img_q, img_k, img_rope)
 
         # ---- Single-stream attention: concat txt + img ----
         q = torch.cat([txt_q, img_q], dim=2)  # [B, H, (L_txt+L_img), D]
@@ -697,80 +673,3 @@ class SingleStreamBlock(nn.Module):
         img_out = x_out[:, L_txt:]
 
         return img_out, txt_out
-
-## Rope helper functions
-
-def rotary_multiply_1d(
-    q: torch.Tensor, 
-    k: torch.Tensor, 
-    rope_1d: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Applies standard 1D rotary embedding to (q,k).
-    - q, k: shape [B, H, L, D]
-    - rope_1d: shape [B, L, D], i.e. cos/sin interleaved
-    Returns:
-        (q_rotated, k_rotated) of the same shape.
-    """
-    B, H, L, D = q.shape
-
-    # Reshape rope to [B, L, D/2, 2] => split into cos and sin
-    rope_2 = rope_1d.view(B, L, D // 2, 2).float()
-
-    q_2 = q.view(B, H, L, D // 2, 2).float()
-    k_2 = k.view(B, H, L, D // 2, 2).float()
-
-    cos_ = rope_2[..., 0].unsqueeze(1)  # => [B, 1, L, D//2]
-    sin_ = rope_2[..., 1].unsqueeze(1)
-
-    # standard rotation: (x, y) -> (x cos - y sin, x sin + y cos)
-    x_q, y_q = q_2[..., 0], q_2[..., 1]
-    x_k, y_k = k_2[..., 0], k_2[..., 1]
-
-    q_rot = torch.stack([
-        x_q * cos_ - y_q * sin_,
-        x_q * sin_ + y_q * cos_
-    ], dim=-1)
-    k_rot = torch.stack([
-        x_k * cos_ - y_k * sin_,
-        x_k * sin_ + y_k * cos_
-    ], dim=-1)
-
-    # reshape back
-    q_out = q_rot.view(B, H, L, D).type_as(q)
-    k_out = k_rot.view(B, H, L, D).type_as(k)
-    return q_out, k_out
-
-
-def rotary_multiply_2d(
-    q: torch.Tensor, 
-    k: torch.Tensor, 
-    rope_2d: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Applies 2D rotary embedding by splitting row vs. col halves.
-    - q, k: shape [B, H, L, D]
-    - rope_2d: shape [B, L, D], where the first half is row-emb, second half is col-emb
-    Returns:
-        (q_rotated, k_rotated) of the same shape.
-    """
-    B, H, L, D_total = q.shape
-    half_dim = D_total // 2
-
-    # The first half of rope_2d => row part
-    # The second half => col part
-    row_part = rope_2d[:, :, :half_dim]
-    col_part = rope_2d[:, :, half_dim:]
-
-    # Split q, k along their last dimension into row vs. col portions
-    q_row, q_col = q.split(half_dim, dim=-1)
-    k_row, k_col = k.split(half_dim, dim=-1)
-
-    # Now rotate row half with row_part, col half with col_part
-    q_row_out, k_row_out = rotary_multiply_1d(q_row, k_row, row_part)
-    q_col_out, k_col_out = rotary_multiply_1d(q_col, k_col, col_part)
-
-    # Concatenate the row-rotated and col-rotated
-    q_out = torch.cat([q_row_out, q_col_out], dim=-1)
-    k_out = torch.cat([k_row_out, k_col_out], dim=-1)
-    return q_out, k_out

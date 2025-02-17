@@ -5,10 +5,11 @@ from dataclasses import dataclass
 
 @dataclass
 class BackboneParams:
-    input_dim: int
-    embed_dim: int
-    num_layers: int
-    num_heads: int
+    use_mmdit: bool = True
+    use_ec: bool = False
+    embed_dim: int = 1152
+    num_layers: int = 24
+    num_heads: int = 1152 // 64
     num_experts: int = 4
     capacity_factor: float = 2.0
     shared_experts: int = 2
@@ -29,6 +30,7 @@ class TransformerBackbone(nn.Module):
     def __init__(self, params: BackboneParams):
         super().__init__()
         mf_min, mf_max = 1.0, 4.0
+        self.use_mmdit = params.use_mmdit
         
         self.layers = nn.ModuleList()
         for i in range(params.num_layers):
@@ -49,16 +51,43 @@ class TransformerBackbone(nn.Module):
                 n_shared = params.shared_experts
                 n_act = min(params.capacity_factor, float(n_exp))
             
-            # self.layers.append(DiTBlock(params.embed_dim, scaled_num_heads, mlp_ratio, 
-                                # n_exp, n_act, pretraining_tp=params.pretraining_tp, num_shared_experts=n_shared, attn_drop=params.dropout))
-
-            if i < params.num_layers // 2: # First half uses DoubleStreamBlock
-                self.layers.append(DoubleStreamBlock(params.embed_dim, scaled_num_heads, mlp_ratio, 
-                                            n_exp, n_act, pretraining_tp=params.pretraining_tp, num_shared_experts=n_shared, dropout=params.dropout, exp_ratio=params.image_text_expert_ratio))
-            else:  # Second half uses SingleStreamBlock
-                self.layers.append(SingleStreamBlock(params.embed_dim, scaled_num_heads, mlp_ratio, 
-                                               n_exp, n_act, pretraining_tp=params.pretraining_tp, num_shared_experts=n_shared, dropout=params.dropout))
-
+            if params.use_mmdit:
+                if i < params.num_layers // 2: # First half uses DoubleStreamBlock
+                    self.layers.append(DoubleStreamBlock(
+                        hidden_size=params.embed_dim,
+                        num_heads=scaled_num_heads,
+                        mlp_ratio=mlp_ratio,
+                        num_experts=n_exp,
+                        capacity_factor=n_act,
+                        pretraining_tp=params.pretraining_tp,
+                        num_shared_experts=n_shared,
+                        dropout=params.dropout,
+                        exp_ratio=params.image_text_expert_ratio,
+                        use_expert_choice=params.use_ec,
+                    ))
+                else:  # Second half uses SingleStreamBlock
+                    self.layers.append(SingleStreamBlock(
+                        hidden_size=params.embed_dim,
+                        num_heads=scaled_num_heads,
+                        mlp_ratio=mlp_ratio,
+                        num_experts=n_exp,
+                        capacity_factor=n_act,
+                        pretraining_tp=params.pretraining_tp,
+                        num_shared_experts=n_shared,
+                        dropout=params.dropout,
+                        use_expert_choice=params.use_ec,
+                    ))
+            else:
+                self.layers.append(DiTBlock(
+                    hidden_size=params.embed_dim,
+                    num_heads=scaled_num_heads,
+                    mlp_ratio=mlp_ratio,
+                    num_experts=n_exp,
+                    num_experts_per_tok=n_act,
+                    pretraining_tp=params.pretraining_tp,
+                    num_shared_experts=n_shared,
+                    attn_drop=params.dropout
+                ))
 
     def forward(
             self, 
@@ -69,7 +98,9 @@ class TransformerBackbone(nn.Module):
             txt_rope: torch.Tensor,
             ):
         for layer in self.layers:
-            x, text = layer(x, text, vec, img_rope, txt_rope)
-            # x = layer(x, vec)
+            if self.use_mmdit:
+                x, text = layer(x, text, vec, img_rope, txt_rope)
+            else:
+                x = layer(x, vec)
 
         return x

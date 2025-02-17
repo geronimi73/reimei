@@ -1,7 +1,21 @@
-
+from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from transformer.moedit import DoubleStreamBlock, DiTBlock
+
+@dataclass
+class TokenMixerParameters:
+    use_mmdit: bool = True
+    use_ec: bool = False
+    embed_dim: int = 1152
+    num_heads: int = 1152 // 64
+    num_layers: int = 2
+    mlp_ratio: int = 4
+    num_experts: int = 8
+    capacity_factor: int = 2.0
+    pretraining_tp: int = 2
+    num_shared_experts: int = 2
+    exp_ratio: int = 4
 
 class TokenMixer(nn.Module):
     """
@@ -15,40 +29,40 @@ class TokenMixer(nn.Module):
     """
     def __init__(
         self,
-        embed_dim: int,
-        num_heads: int,
-        num_layers: int = 2,
-        mlp_ratio: int = 4,
-        num_experts: int = 8,
-        capacity_factor: int = 2.0,
-        pretraining_tp: int = 2,
-        num_shared_experts: int = 2,
-        exp_ratio: int = 4
+        params: TokenMixerParameters,
     ):
         super().__init__()
-        self.layers = nn.ModuleList([
-            DoubleStreamBlock(
-                hidden_size=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                num_experts=num_experts,
-                capacity_factor=capacity_factor,
-                pretraining_tp=pretraining_tp,
-                num_shared_experts=num_shared_experts,
-                exp_ratio=exp_ratio
-            )
-            # DiTBlock(
-            #     hidden_size=embed_dim,
-            #     num_heads=num_heads,
-            #     mlp_ratio=mlp_ratio,
-            #     num_experts=num_experts,
-            #     num_experts_per_tok=capacity_factor,
-            #     pretraining_tp=pretraining_tp,
-            #     num_shared_experts=num_shared_experts,
-            #     attn_drop=0.1
-            # )
-            for _ in range(num_layers)
-        ])
+        if params.use_mmdit:
+            self.layers = nn.ModuleList([
+                DoubleStreamBlock(
+                    hidden_size=params.embed_dim,
+                    num_heads=params.num_heads,
+                    mlp_ratio=params.mlp_ratio,
+                    num_experts=params.num_experts,
+                    capacity_factor=params.capacity_factor,
+                    pretraining_tp=params.pretraining_tp,
+                    num_shared_experts=params.num_shared_experts,
+                    exp_ratio=params.exp_ratio,
+                    use_expert_choice=params.use_ec,
+                )
+                for _ in range(params.num_layers)
+            ])
+        else:
+            self.layers = nn.ModuleList([
+                DiTBlock(
+                    hidden_size=params.embed_dim,
+                    num_heads=params.num_heads,
+                    mlp_ratio=params.mlp_ratio,
+                    num_experts=params.num_experts,
+                    num_experts_per_tok=params.capacity_factor,
+                    pretraining_tp=params.pretraining_tp,
+                    num_shared_experts=params.num_shared_experts,
+                    attn_drop=0.1
+                )
+                for _ in range(params.num_layers)
+            ])
+
+
 
     def forward(
         self,

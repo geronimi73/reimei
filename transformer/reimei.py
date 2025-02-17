@@ -5,20 +5,22 @@ from transformer.moedit import MoeMLP
 from .embed import PatchEmbed, rope_1d, rope_2d, sincos_1d, sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
 from .utils import remove_masked_tokens, add_masked_tokens, unpatchify
 from .backbone import BackboneParams, TransformerBackbone
-from .token_mixer import TokenMixer
+from .token_mixer import TokenMixer, TokenMixerParameters
 import torch
 from config import AE_SCALING_FACTOR
 from dataclasses import dataclass
 
 @dataclass
 class ReiMeiParameters:
-    channels: int
-    patch_size: tuple[int, int]
-    embed_dim: int
-    num_layers: int
-    num_heads: int
-    siglip_dim: int
-    bert_dim: int
+    use_mmdit: bool = True
+    use_ec: bool = False
+    channels: int = 32
+    patch_size: tuple[int, int] = (1,1)
+    embed_dim: int = 1152
+    num_layers: int = 24
+    num_heads: int = 1152 // 64
+    siglip_dim: int = 1152
+    bert_dim: int = 1024
     num_classes: int = 1000
     num_experts: int = 4
     capacity_factor: float = 2.0
@@ -94,6 +96,7 @@ class ReiMei(nn.Module):
         self.head_dim = params.embed_dim // params.num_heads
         self.channels = params.channels
         self.patch_size = params.patch_size
+        self.use_mmdit = params.use_mmdit
         
         # Timestep embedding
         self.time_embedder = TimestepEmbedder(self.embed_dim)
@@ -113,12 +116,25 @@ class ReiMei(nn.Module):
     
         # Vector (y) embedding
         # self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
-        
-        # TokenMixer
-        self.token_mixer = TokenMixer(self.embed_dim, params.num_heads, params.token_mixer_layers, num_experts=params.num_experts, capacity_factor=params.capacity_factor, exp_ratio=params.image_text_expert_ratio, num_shared_experts=params.shared_experts)
 
+        # TokenMixer
+        token_mixer_params = TokenMixerParameters(
+            use_mmdit=params.use_mmdit,
+            use_ec=params.use_ec,
+            embed_dim=self.embed_dim,
+            num_heads=params.num_heads,
+            num_layers=params.token_mixer_layers,
+            num_experts=params.num_experts,
+            capacity_factor=params.capacity_factor,
+            num_shared_experts=params.shared_experts,
+            exp_ratio=params.image_text_expert_ratio,
+        )
+        self.token_mixer = TokenMixer(token_mixer_params)
+
+        # Backbone transformer model
         backbone_params = BackboneParams(
-            input_dim=self.channels,
+            use_mmdit=params.use_mmdit,
+            use_ec=params.use_ec,
             embed_dim=self.embed_dim,
             num_layers=params.num_layers,
             num_heads=params.num_heads,
@@ -128,8 +144,6 @@ class ReiMei(nn.Module):
             dropout=params.dropout,
             image_text_expert_ratio=params.image_text_expert_ratio,
         )
-
-        # Backbone transformer model
         self.backbone = TransformerBackbone(backbone_params)
         
         self.output_layer = OutputLayer(self.embed_dim, self.channels * self.patch_size[0] * self.patch_size[1])
@@ -224,6 +238,7 @@ class ReiMei(nn.Module):
         vec = self.siglip_embedder(sig_vec) + time
         # vec = torch.cat([sig_vec, self.bert_norm(bert_vec)], dim=1)
         # vec = self.vector_embedder(vec) + time  # (batch_size, embed_dim)
+
         # vec = self.embedding_table(labels, train, None if cfg else torch.ones(batch_size, device=img.device, dtype=torch.int))  + time  # (batch_size, embed_dim)
 
         # Image embedding
@@ -234,13 +249,14 @@ class ReiMei(nn.Module):
         sincos_2d_pe = sincos_2d_pe.to(device=img.device, dtype=img.dtype).unsqueeze(0).expand(batch_size, -1, -1)
         img = img + sincos_2d_pe
 
-        img_rope = rope_2d(self.head_dim, patched_h, patched_w).unsqueeze(0).repeat(batch_size, 1, 1).to(img.device)
-        txt_rope = rope_1d(self.head_dim, txt.shape[1]).repeat(batch_size, 1, 1).to(txt.device)
+        if self.use_mmdit:
+            img_rope = rope_2d(self.head_dim, patched_h, patched_w).unsqueeze(0).repeat(batch_size, 1, 1).to(img.device)
+            txt_rope = rope_1d(self.head_dim, txt.shape[1]).repeat(batch_size, 1, 1).to(txt.device)
 
-        # Token-mixer
-        img, txt = self.token_mixer(img, txt, vec, img_rope, txt_rope)
-        # img = self.token_mixer(img, vec)
-
+            # Token-mixer
+            img, txt = self.token_mixer(img, txt, vec, img_rope, txt_rope)
+        else:
+            img = self.token_mixer(img, vec)
 
         # Remove masked patches
         if img_mask is not None:
@@ -251,10 +267,11 @@ class ReiMei(nn.Module):
             txt_rope = txt_rope[:, :txt.size(1), :]
 
         # Backbone transformer model
-        img = self.backbone(img, txt, vec, img_rope, txt_rope)
-        # img = self.backbone(img, vec)
+        if self.use_mmdit:
+            img = self.backbone(img, txt, vec, img_rope, txt_rope)
+        else:
+            img = self.backbone(img, vec)
 
-        
         # Final output layer
         # (bs, unmasked_num_tokens, embed_dim) -> (bs, unmasked_num_tokens, in_channels)
         img = self.output_layer(img, vec)
