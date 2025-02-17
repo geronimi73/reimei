@@ -2,7 +2,7 @@ import math
 import torch.nn as nn
 from torch.nn.modules.normalization import RMSNorm
 from transformer.moedit import MoeMLP
-from .embed import PatchEmbed, sincos_1d, sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
+from .embed import PatchEmbed, rope_1d, rope_2d, sincos_1d, sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
 from .utils import remove_masked_tokens, add_masked_tokens, unpatchify
 from .backbone import BackboneParams, TransformerBackbone
 from .token_mixer import TokenMixer
@@ -91,7 +91,7 @@ class ReiMei(nn.Module):
         super().__init__()
         
         self.embed_dim = params.embed_dim
-        self.pos_emb_dim = params.embed_dim // params.num_heads
+        self.head_dim = params.embed_dim // params.num_heads
         self.channels = params.channels
         self.patch_size = params.patch_size
         
@@ -103,16 +103,16 @@ class ReiMei(nn.Module):
         
         # Text embedding
         self.siglip_embedder = MLPEmbedder(params.siglip_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
-        self.bert_embedder = MLPEmbedder(params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
+        # self.bert_embedder = MLPEmbedder(params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
 
         # Label embedding
         # self.embedding_table = LabelEmbedder(params.num_classes, self.embed_dim)
 
         # Only bert needs normalization, siglip embeddings are in reasonable range
-        self.bert_norm = RMSNorm(params.bert_dim)
+        # self.bert_norm = RMSNorm(params.bert_dim)
     
         # Vector (y) embedding
-        self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
+        # self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
         
         # TokenMixer
         self.token_mixer = TokenMixer(self.embed_dim, params.num_heads, params.token_mixer_layers, num_experts=params.num_experts, capacity_factor=params.capacity_factor, exp_ratio=params.image_text_expert_ratio, num_shared_experts=params.shared_experts)
@@ -212,16 +212,18 @@ class ReiMei(nn.Module):
 
         # Text embeddings
         sig_txt = self.siglip_embedder(sig_txt)
-        bert_txt = self.bert_embedder(self.bert_norm(bert_txt))
-        txt = torch.cat([sig_txt, bert_txt], dim=1)
+        # bert_txt = self.bert_embedder(self.bert_norm(bert_txt))
+        # txt = torch.cat([sig_txt, bert_txt], dim=1)
+        txt = sig_txt
 
         _, seq_len, _ = txt.shape
 
         # Vector embedding (timestep + vector_embeddings)
         time = self.time_embedder(time)
 
-        vec = torch.cat([sig_vec, self.bert_norm(bert_vec)], dim=1)
-        vec = self.vector_embedder(vec) + time  # (batch_size, embed_dim)
+        vec = self.siglip_embedder(sig_vec) + time
+        # vec = torch.cat([sig_vec, self.bert_norm(bert_vec)], dim=1)
+        # vec = self.vector_embedder(vec) + time  # (batch_size, embed_dim)
         # vec = self.embedding_table(labels, train, None if cfg else torch.ones(batch_size, device=img.device, dtype=torch.int))  + time  # (batch_size, embed_dim)
 
         # Image embedding
@@ -232,19 +234,24 @@ class ReiMei(nn.Module):
         sincos_2d_pe = sincos_2d_pe.to(device=img.device, dtype=img.dtype).unsqueeze(0).expand(batch_size, -1, -1)
         img = img + sincos_2d_pe
 
+        img_rope = rope_2d(self.head_dim, patched_h, patched_w).unsqueeze(0).repeat(batch_size, 1, 1).to(img.device)
+        txt_rope = rope_1d(self.head_dim, txt.shape[1]).repeat(batch_size, 1, 1).to(txt.device)
+
         # Token-mixer
-        img, txt = self.token_mixer(img, txt, vec, patched_h, patched_w)
+        img, txt = self.token_mixer(img, txt, vec, img_rope, txt_rope)
         # img = self.token_mixer(img, vec)
 
 
         # Remove masked patches
         if img_mask is not None:
             img = remove_masked_tokens(img, img_mask)
+            img_rope = remove_masked_tokens(img_rope, img_mask)
         if txt_mask is not None:
             txt = remove_masked_tokens(txt, txt_mask)
+            txt_rope = txt_rope[:, :txt.size(1), :]
 
         # Backbone transformer model
-        img = self.backbone(img, txt, vec, img_mask, patched_h, patched_w)
+        img = self.backbone(img, txt, vec, img_rope, txt_rope)
         # img = self.backbone(img, vec)
 
         
@@ -275,10 +282,10 @@ class ReiMei(nn.Module):
 
             vc = self(z, t, sig_emb, sig_vec, bert_emb, bert_vec, labels, None, None, False, False).to(torch.bfloat16)
             if cfg != 1.0:
-                null_sig_emb = torch.zeros_like(sig_emb)
-                null_sig_vec = torch.zeros_like(sig_vec)
-                null_bert_emb = torch.zeros_like(bert_emb)
-                null_bert_vec = torch.zeros_like(bert_vec)
+                null_sig_emb = torch.zeros(b, 1, 1152).to(z.device, torch.bfloat16)
+                null_sig_vec = torch.zeros(b, 1152).to(z.device, torch.bfloat16)
+                null_bert_emb = torch.zeros(b, 1, 1024).to(z.device, torch.bfloat16)
+                null_bert_vec = torch.zeros(b, 1024).to(z.device, torch.bfloat16)
                 vu = self(z, t, null_sig_emb, null_sig_vec, null_bert_emb, null_bert_vec, labels, None, None, False, True)
                 vc = vu + cfg * (vc - vu)
 

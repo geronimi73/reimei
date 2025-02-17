@@ -81,7 +81,7 @@ if __name__ == "__main__":
     # torch.set_float32_matmul_precision('high')
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    embed_dim = 384
+    embed_dim = 768
     patch_size = (1,1)
 
     params = ReiMeiParameters(
@@ -155,7 +155,7 @@ if __name__ == "__main__":
         del grid, example_ground_truth, example_latents, example_captions
 
         # example_captions = ["a green field with green bushes", "bright blue sky with clouds", "a red apple on a wooden table", "a field of green grass with a snowcapped mountain in the background"]
-        example_captions = ["a cheeseburger on a black plate and cutlery", "a bright yellow banana on a wodden table", "a white cup on a glass table", "a volcano with a yellow sunset sky"]
+        example_captions = ["a cheeseburger on a black plate and cutlery", "a bright yellow banana on a wooden table", "a white cup on a glass table", "a volcano with a yellow sunset sky"]
         ex_sig_emb, ex_sig_vec, ex_bert_emb, ex_bert_vec = dataset.encode(example_captions)
         ex_labels = torch.tensor([933, 954, 968, 980], dtype=torch.int).to(device)
         
@@ -182,19 +182,20 @@ if __name__ == "__main__":
 
         # siglip_emb = torch.zeros(bs, 1, 1152).to(device, dtype=DTYPE)
         # siglip_vec = torch.zeros(bs, 1152).to(device, dtype=DTYPE)
-        # bert_emb = torch.zeros(bs, 1, 1024).to(device, dtype=DTYPE)
-        # bert_vec = torch.zeros(bs, 1024).to(device, dtype=DTYPE)
+        bert_emb = torch.zeros(bs, 1, 1024).to(device, dtype=DTYPE)
+        bert_vec = torch.zeros(bs, 1024).to(device, dtype=DTYPE)
 
         img_mask = random_mask(bs, latents.shape[-2], latents.shape[-1], patch_size, mask_ratio=MASK_RATIO).to(device, dtype=DTYPE)
         cfg_mask = random_mask(bs, 1, 1, (1, 1), CFG_RATIO).to(device, dtype=DTYPE).view(bs)
 
         siglip_emb = batch["siglip_emb"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
         siglip_vec = batch["siglip_vec"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
-        bert_emb = batch["bert_emb"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
-        bert_vec = batch["bert_vec"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
+        # bert_emb = batch["bert_emb"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
+        # bert_vec = batch["bert_vec"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
         labels = batch["label"].to(device)
 
-        txt_mask = random_mask(bs, siglip_emb.size(1)+bert_emb.size(1), 1, (1, 1), mask_ratio=MASK_RATIO).to(device=device, dtype=DTYPE)
+        txt_mask = random_mask(bs, siglip_emb.size(1), 1, (1, 1), mask_ratio=MASK_RATIO).to(device=device, dtype=DTYPE)
+        # txt_mask = random_mask(bs, siglip_emb.size(1)+bert_emb.size(1), 1, (1, 1), mask_ratio=MASK_RATIO).to(device=device, dtype=DTYPE)
 
         nt = torch.randn((bs,), device=device, dtype=DTYPE)
         t = torch.sigmoid(nt)

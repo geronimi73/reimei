@@ -1,3 +1,4 @@
+import torch
 from transformer.moedit import DoubleStreamBlock, SingleStreamBlock, DiTBlock
 from torch import nn
 from dataclasses import dataclass
@@ -27,19 +28,16 @@ def nearest_divisor(scaled_num_heads, embed_dim):
 class TransformerBackbone(nn.Module):
     def __init__(self, params: BackboneParams):
         super().__init__()
-        mf_min, mf_max = 0.5, 4.0
-        ma_min, ma_max = 0.5, 1.0
+        mf_min, mf_max = 1.0, 4.0
         
         self.layers = nn.ModuleList()
         for i in range(params.num_layers):
             # Calculate scaling factors for the i-th layer using linear interpolation
             mf = mf_min + (mf_max - mf_min) * i / (params.num_layers - 1)
-            ma = ma_min + (ma_max - ma_min) * i / (params.num_layers - 1)
 
             # Scale the dimensions according to the scaling factors
-            scaled_mlp_dim = int(params.embed_dim * mf)
-            scaled_num_heads = max(1, int(params.num_heads * ma))
-            scaled_num_heads = nearest_divisor(scaled_num_heads, params.embed_dim)
+            scaled_mlp_dim = (int(params.embed_dim * mf) // params.num_heads) * params.num_heads
+            scaled_num_heads = params.num_heads
             mlp_ratio = max(1, int(scaled_mlp_dim / params.embed_dim))
 
             if i % 2 == 0:  # Even layers use regular DiT (no MoE)
@@ -64,15 +62,14 @@ class TransformerBackbone(nn.Module):
 
     def forward(
             self, 
-            x,
-            text, 
-            vec, 
-            mask, 
-            original_h, 
-            original_w
+            x: torch.Tensor,
+            text: torch.Tensor,
+            vec: torch.Tensor,
+            img_rope: torch.Tensor,
+            txt_rope: torch.Tensor,
             ):
         for layer in self.layers:
-            x, text = layer(x, text, vec, mask, original_h, original_w)
+            x, text = layer(x, text, vec, img_rope, txt_rope)
             # x = layer(x, vec)
 
         return x

@@ -446,7 +446,7 @@ class DoubleStreamBlock(nn.Module):
         dropout: float = 0.1,
         exp_ratio: int = 4,
         use_expert_choice: bool = False,
-        use_rope: bool = False,
+        use_rope: bool = True,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -497,9 +497,8 @@ class DoubleStreamBlock(nn.Module):
         img: torch.Tensor,          # [B, L_img, hidden_size]
         txt: torch.Tensor,          # [B, L_txt, hidden_size]
         vec: torch.Tensor,          # conditioning vector => Modulation
-        mask: torch.Tensor,
-        h: int,
-        w: int,
+        img_rope: torch.Tensor,
+        txt_rope: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns updated (img, txt).
@@ -509,19 +508,6 @@ class DoubleStreamBlock(nn.Module):
           3) joint attention of (txt+img)
         """
         B, L_txt, _ = txt.shape
-
-        if self.use_rope:
-            # (seq_len, pos_emb_dim)
-            txt_rope = rope_1d(self.head_dim, L_txt)
-            # (batch_size, seq_len, pos_emb_dim)
-            txt_rope = txt_rope.unsqueeze(0).repeat(B, 1, 1).to(img.device)
-
-            # (height, width, embed_dim)
-            img_rope = rope_2d(self.head_dim, h, w)
-            # (batch_size, height*width, pos_emb_dim)
-            img_rope = img_rope.unsqueeze(0).repeat(B, 1, 1).to(img.device)
-            if mask is not None:
-                img_rope = remove_masked_tokens(img_rope, mask)
 
         # 1) modulate image
         img_mod1, img_mod2 = self.img_mod(vec)  
@@ -598,7 +584,7 @@ class SingleStreamBlock(nn.Module):
         num_shared_experts: int = 2,
         dropout: float = 0.1,
         use_expert_choice: bool = False,
-        use_rope: bool = False,
+        use_rope: bool = True,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -647,23 +633,11 @@ class SingleStreamBlock(nn.Module):
         img: torch.Tensor,   # [B, L_img, hidden_size]
         txt: torch.Tensor,   # [B, L_txt, hidden_size]
         vec: torch.Tensor,   # conditioning vector => for Modulation
-        mask: torch.Tensor,  # optional mask for images (or None)
-        h: int,              # image height (2D RoPE)
-        w: int,              # image width  (2D RoPE)
+        img_rope: torch.Tensor,
+        txt_rope: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         B, L_txt, _ = txt.shape
         _, L_img, _ = img.shape
-
-        if self.use_rope:
-            # 1) Prepare text RoPE (1D)
-            rope_txt = rope_1d(self.head_dim, L_txt)  # [L_txt, d]
-            rope_txt = rope_txt.unsqueeze(0).repeat(B, 1, 1).to(txt.device)
-
-            # 2) Prepare image RoPE (2D)
-            rope_img = rope_2d(self.head_dim, h, w)   # [L_img, d], flattened from (h*w)
-            rope_img = rope_img.unsqueeze(0).repeat(B, 1, 1).to(img.device)
-            if mask is not None:
-                rope_img = remove_masked_tokens(rope_img, mask)
 
         # 3) modulation parameters => "double=True" => mod1, mod2
         mod1, mod2 = self.modulation(vec)
@@ -679,7 +653,7 @@ class SingleStreamBlock(nn.Module):
 
         if self.use_rope:
             # Apply 1D RoPE
-            txt_q, txt_k = rotary_multiply_1d(txt_q, txt_k, rope_txt)
+            txt_q, txt_k = rotary_multiply_1d(txt_q, txt_k, txt_rope)
 
         # ---- IMAGE branch ----
         img_in = self.norm(img)
@@ -692,7 +666,7 @@ class SingleStreamBlock(nn.Module):
 
         if self.use_rope:
             # Apply 2D RoPE
-            img_q, img_k = rotary_multiply_2d(img_q, img_k, rope_img)
+            img_q, img_k = rotary_multiply_2d(img_q, img_k, img_rope)
 
         # ---- Single-stream attention: concat txt + img ----
         q = torch.cat([txt_q, img_q], dim=2)  # [B, H, (L_txt+L_img), D]
