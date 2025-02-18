@@ -206,8 +206,6 @@ class ReiMei(nn.Module):
         # vec = torch.cat([sig_vec, self.bert_norm(bert_vec)], dim=1)
         # vec = self.vector_embedder(vec) + time  # (batch_size, embed_dim)
 
-        # vec = self.embedding_table(labels, train, None if cfg else torch.ones(batch_size, device=img.device, dtype=torch.int))  + time  # (batch_size, embed_dim)
-
         # Image embedding
         img = self.image_embedder(img)
 
@@ -216,11 +214,8 @@ class ReiMei(nn.Module):
         sincos_2d_pe = sincos_2d_pe.to(device=img.device, dtype=img.dtype).unsqueeze(0).expand(batch_size, -1, -1)
         img = img + sincos_2d_pe
 
-        if self.use_mmdit:
-            # Token-mixer
-            img, txt = self.token_mixer(img, txt, vec)
-        else:
-            img = self.token_mixer(img, vec)
+        # Token-mixer
+        img, txt = self.token_mixer(img, txt, vec)
 
         # Remove masked patches
         if img_mask is not None:
@@ -229,10 +224,7 @@ class ReiMei(nn.Module):
             txt = remove_masked_tokens(txt, txt_mask)
 
         # Backbone transformer model
-        if self.use_mmdit:
-            img = self.backbone(img, txt, vec)
-        else:
-            img = self.backbone(img, vec)
+        img = self.backbone(img, txt, vec)
 
         # Final output layer
         # (bs, unmasked_num_tokens, embed_dim) -> (bs, unmasked_num_tokens, in_channels)

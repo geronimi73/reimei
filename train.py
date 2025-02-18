@@ -66,6 +66,15 @@ class MemmapDataset(Dataset):
         sample = self.data[index]
         
         return sample
+    
+class InfiniteDataLoader:
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __iter__(self):
+        while True:
+            for batch in self.dataset:
+                yield batch
 
 def batch_to_tensors(batch):
     latents = batch["latent"]
@@ -81,11 +90,12 @@ if __name__ == "__main__":
     # torch.set_float32_matmul_precision('high')
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    embed_dim = 768
+    embed_dim = 1152
     patch_size = (1,1)
 
     params = ReiMeiParameters(
         use_mmdit=True,
+        use_ec=True,
         channels=AE_CHANNELS,
         patch_size=patch_size,
         embed_dim=embed_dim,
@@ -110,10 +120,11 @@ if __name__ == "__main__":
 
     print("Starting training...")
     
-    # dataset = get_dataset(BS, SEED + accelerator.process_index, device=device, num_workers=1)
-    ds = MemmapDataset(f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth")
+    dataset = get_dataset(BS, SEED + accelerator.process_index, device=device, num_workers=1)
+    # ds = MemmapDataset(f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth")
     # ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=16, split="train").to_iterable_dataset(1000)
-    dataset = DataLoader(ds, batch_size=BS, num_workers=0)
+    # dataset = DataLoader(ds, batch_size=BS, num_workers=0)
+    # dataset = InfiniteDataLoader(dataset)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.01)
 
@@ -140,9 +151,9 @@ if __name__ == "__main__":
         noise = torch.randn(4, AE_CHANNELS, 9, 9).to(device, dtype=DTYPE)
         example_batch = next(iter(dataset))
 
-        example_latents = example_batch.to(device, dtype=DTYPE)[:4]
+        # example_latents = example_batch.to(device, dtype=DTYPE)[:4]
 
-        # example_latents = example_batch["ae_latent"][:4].to(device, dtype=DTYPE)
+        example_latents = example_batch["ae_latent"][:4].to(device, dtype=DTYPE)
         # example_captions = example_batch["caption"][:4]
 
         with torch.no_grad():
@@ -158,13 +169,13 @@ if __name__ == "__main__":
         del grid, example_ground_truth, example_latents
 
         # example_captions = ["a green field with green bushes", "bright blue sky with clouds", "a red apple on a wooden table", "a field of green grass with a snowcapped mountain in the background"]
-        # example_captions = ["a cheeseburger on a black plate and cutlery", "a bright yellow banana on a wooden table", "a white cup on a glass table", "a volcano with a yellow sunset sky"]
-        # ex_sig_emb, ex_sig_vec, ex_bert_emb, ex_bert_vec = dataset.encode(example_captions)
+        example_captions = ["a cheeseburger on a black plate and cutlery", "a bright yellow banana on a wooden table", "a white cup on a glass table", "a volcano with a yellow sunset sky"]
+        ex_sig_emb, ex_sig_vec, ex_bert_emb, ex_bert_vec = dataset.encode(example_captions)
         
-        ex_sig_emb = torch.zeros(4, 1, 1152).to(device, dtype=DTYPE)
-        ex_sig_vec = torch.zeros(4, 1152).to(device, dtype=DTYPE)
-        ex_bert_emb = torch.zeros(4, 1, 1024).to(device, dtype=DTYPE)
-        ex_bert_vec = torch.zeros(4, 1024).to(device, dtype=DTYPE)
+        # ex_sig_emb = torch.zeros(4, 1, 1152).to(device, dtype=DTYPE)
+        # ex_sig_vec = torch.zeros(4, 1152).to(device, dtype=DTYPE)
+        # ex_bert_emb = torch.zeros(4, 1, 1024).to(device, dtype=DTYPE)
+        # ex_bert_vec = torch.zeros(4, 1024).to(device, dtype=DTYPE)
 
         ae = ae.to("cpu")
         losses = []
@@ -172,9 +183,9 @@ if __name__ == "__main__":
     progress_bar = tqdm(train_dataloader, leave=False, total=TRAIN_STEPS)
     for batch_idx, batch in enumerate(progress_bar):
         # latents = batch_to_tensors(batch).to(device, DTYPE)
-        latents = batch.to(device, dtype=DTYPE)
+        # latents = batch.to(device, dtype=DTYPE)
 
-        # latents = batch["ae_latent"].to(device, dtype=DTYPE)
+        latents = batch["ae_latent"].to(device, dtype=DTYPE)
 
         bs, c, h, w = latents.shape
         latents = latents * AE_SCALING_FACTOR
@@ -182,22 +193,21 @@ if __name__ == "__main__":
         # if batch_idx % 200 == 0:
             # print("Batch Latents std dev mean", torch.std_mean(latents))
 
-        siglip_emb = torch.zeros(bs, 1, 1152).to(device, dtype=DTYPE)
-        siglip_vec = torch.zeros(bs, 1152).to(device, dtype=DTYPE)
+        # siglip_emb = torch.zeros(bs, 1, 1152).to(device, dtype=DTYPE)
+        # siglip_vec = torch.zeros(bs, 1152).to(device, dtype=DTYPE)
         bert_emb = torch.zeros(bs, 1, 1024).to(device, dtype=DTYPE)
         bert_vec = torch.zeros(bs, 1024).to(device, dtype=DTYPE)
 
         img_mask = random_mask(bs, latents.shape[-2], latents.shape[-1], patch_size, mask_ratio=MASK_RATIO).to(device, dtype=DTYPE)
         cfg_mask = random_mask(bs, 1, 1, (1, 1), CFG_RATIO).to(device, dtype=DTYPE).view(bs)
 
-        # siglip_emb = batch["siglip_emb"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
-        # siglip_vec = batch["siglip_vec"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
+        siglip_emb = batch["siglip_emb"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
+        siglip_vec = batch["siglip_vec"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
         # bert_emb = batch["bert_emb"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
         # bert_vec = batch["bert_vec"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
-        # labels = batch["label"].to(device)
 
-        txt_mask = random_mask(bs, siglip_emb.size(1), 1, (1, 1), mask_ratio=0).to(device=device, dtype=DTYPE)
-        # txt_mask = random_mask(bs, siglip_emb.size(1), 1, (1, 1), mask_ratio=MASK_RATIO).to(device=device, dtype=DTYPE)
+        # txt_mask = random_mask(bs, siglip_emb.size(1), 1, (1, 1), mask_ratio=0).to(device=device, dtype=DTYPE)
+        txt_mask = random_mask(bs, siglip_emb.size(1), 1, (1, 1), mask_ratio=MASK_RATIO).to(device=device, dtype=DTYPE)
         # txt_mask = random_mask(bs, siglip_emb.size(1)+bert_emb.size(1), 1, (1, 1), mask_ratio=MASK_RATIO).to(device=device, dtype=DTYPE)
 
         nt = torch.randn((bs,), device=device, dtype=DTYPE)
@@ -208,9 +218,6 @@ if __name__ == "__main__":
         x_t = (1 - texp) * latents + texp * z
 
         vtheta = model(x_t, t, siglip_emb, siglip_vec, bert_emb, bert_vec, img_mask, txt_mask)
-
-        # if batch_idx % 200 == 0:
-            # print("vtheta std dev mean", torch.std_mean(vtheta))
 
         latents = apply_mask_to_tensor(latents, img_mask, patch_size)
         z = apply_mask_to_tensor(z, img_mask, patch_size)

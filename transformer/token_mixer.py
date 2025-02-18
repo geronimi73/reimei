@@ -32,6 +32,7 @@ class TokenMixer(nn.Module):
         params: TokenMixerParameters,
     ):
         super().__init__()
+        self.use_mmdit = params.use_mmdit
         if params.use_mmdit:
             self.layers = nn.ModuleList([
                 DoubleStreamBlock(
@@ -75,7 +76,8 @@ class TokenMixer(nn.Module):
         cross-attention over the concatenation of (img, txt), plus MoE-based feedforwards.
         """
         for layer in self.layers:
-            img, txt = layer(img, txt, vec)
-            # img = layer(img, vec)
+            if self.use_mmdit:
+                img, txt = layer(img, txt, vec)
+            else:
+                img = layer(img, vec)
         return img, txt
-        # return img

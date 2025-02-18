@@ -69,33 +69,29 @@ class EC_MoEGate(nn.Module):
         """
         hidden_states shape: (B, S, d)
         Returns:
-            topk_idx:    LongTensor of shape (E, C)
-            topk_weight: FloatTensor of shape (E, C)
+            topk_idx:    LongTensor of shape (B, E, C)
+            topk_weight: FloatTensor of shape (B, E, C)
         """
         B, S, d = hidden_states.shape
 
-        # 1) Flatten to (B*S, d)
-        flat_x = hidden_states.reshape(-1, d)  # shape: (B*S, d)
+        # Compute logits for each token: shape (B, S, E)
+        logits = F.linear(hidden_states, self.weight)  # no bias
 
-        # 2) Compute token-expert logits => shape: (B*S, E)
-        logits = F.linear(flat_x, self.weight)  # no bias
-
-        # 3) Softmax across experts => shape: (B*S, E)
+        # Apply softmax over experts for each token: shape (B, S, E)
         scores = logits.softmax(dim=-1)
 
-        # 4) Transpose to (E, B*S) so each expert can pick top-C tokens
-        scores_t = scores.transpose(0, 1)  # => (E, B*S)
+        # Transpose to shape (B, E, S) so that for each batch and each expert we have S scores
+        scores = scores.transpose(1, 2)  # now (B, E, S)
 
-        # 5) Compute capacity = floor or ceil as you prefer
-        #    Using integer floor here:
-        capacity = int(B * S * self.f_c / self.num_experts)
-        # (If you want to account for batch size, do: capacity = int(B*S*self.f_c / self.num_experts))
+        # Compute per-example capacity: each expert picks top C tokens per example
+        capacity = int(S * self.f_c / self.num_experts)
 
-        # 6) Each expert picks top-C tokens
-        topk_weight, topk_idx = torch.topk(scores_t, k=capacity, dim=-1, sorted=False)
-        # shapes: both (E, C)
+        # Each expert in each batch element picks top-C tokens over the S tokens
+        topk_weight, topk_idx = torch.topk(scores, k=capacity, dim=-1, sorted=False)
+        # topk_weight and topk_idx: (B, E, C)
 
         return topk_idx, topk_weight
+
 
 class EC_SparseMoeBlock(nn.Module):
     """
@@ -148,37 +144,46 @@ class EC_SparseMoeBlock(nn.Module):
         B, S, d = hidden_states.shape
         identity = hidden_states
 
-        # 1) Gate: each expert selects top-C tokens
+        # Gate returns indices of shape (B, E, C)
         topk_idx, topk_weight = self.gate(hidden_states)
 
-        # 2) Flatten tokens
-        flat_x = hidden_states.view(-1, d)  # shape: (B*S, d)
+        # Create an output buffer for the flattened tokens: (B*S, d)
+        flat_out = torch.zeros(B * S, d, device=hidden_states.device, dtype=hidden_states.dtype)
 
-        # 3) Initialize output buffer
-        flat_out = torch.zeros_like(flat_x)
+        # Compute an offset for each batch element so that indices point to the correct positions
+        batch_offset = (torch.arange(B, device=hidden_states.device) * S).view(B, 1, 1)
+        # Adjust the token indices to be in the flattened space: shape (B, E, C)
+        flat_topk_idx = topk_idx + batch_offset
 
-        # 4) For each expert, gather, process, scatter
+        # Flatten hidden_states: (B*S, d)
+        flat_x = hidden_states.view(B * S, d)
+
+        # Process each expert (the gate still has shape (B, E, C))
         for expert_idx, expert_layer in enumerate(self.experts):
-            # token indices this expert claims
-            token_indices = topk_idx[expert_idx]   # shape: (C,)
+            # Extract indices and weights for expert_idx across the entire batch: shapes (B, C)
+            expert_indices = flat_topk_idx[:, expert_idx, :]  # (B, C)
+            expert_weights = topk_weight[:, expert_idx, :]      # (B, C)
 
-            # gather tokens
-            expert_tokens = flat_x[token_indices]  # shape: (C, d)
+            # Flatten these so that we process all selected tokens at once: (B*C,)
+            expert_indices_flat = expert_indices.reshape(-1)
+            expert_weights_flat = expert_weights.reshape(-1, 1)  # (B*C, 1)
 
-            # forward through the expert
+            # Gather tokens from the flattened hidden states: (B*C, d)
+            expert_tokens = flat_x[expert_indices_flat]
+            
+            # Process the tokens through the expert
             expert_out = expert_layer(expert_tokens)
+            
+            # Weight the outputs by the gating weights
+            expert_out = expert_out * expert_weights_flat
 
-            # multiply by gating weight
-            w = topk_weight[expert_idx].unsqueeze(-1)  # shape: (C, 1)
-            expert_out = expert_out * w
+            # Scatter-add back into the flat output buffer
+            flat_out.index_add_(0, expert_indices_flat, expert_out)
 
-            # scatter-add back
-            flat_out.index_add_(0, token_indices, expert_out)
-
-        # 5) Reshape to original shape
+        # Reshape the output back to (B, S, d)
         out = flat_out.view(B, S, d)
 
-        # 6) Optional: add shared-expert MLP on top
+        # Optionally add the shared-expert MLP
         if self.n_shared_experts is not None:
             out = out + self.shared_experts(identity)
 
@@ -406,7 +411,7 @@ class DiTBlock(nn.Module):
     """
     def __init__(
         self, hidden_size, num_heads, mlp_ratio=4,
-        num_experts=8, num_experts_per_tok=2, pretraining_tp=2, num_shared_experts=2, **block_kwargs
+        num_experts=8, num_experts_per_tok=2, pretraining_tp=2, num_shared_experts=2, use_expert_choice=False, **block_kwargs
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
@@ -416,7 +421,10 @@ class DiTBlock(nn.Module):
         # mlp_hidden_dim = int(hidden_size * mlp_ratio)
         # approx_gelu = lambda: nn.GELU(approximate="tanh")
         # self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0) 
-        self.moe = TC_SparseMoeBlock(hidden_size, mlp_ratio, num_experts, int(num_experts_per_tok), pretraining_tp, num_shared_experts=num_shared_experts)
+        if use_expert_choice:
+            self.moe = EC_SparseMoeBlock(hidden_size, mlp_ratio, num_experts, float(num_experts_per_tok), pretraining_tp, num_shared_experts=num_shared_experts)
+        else:
+            self.moe = TC_SparseMoeBlock(hidden_size, mlp_ratio, num_experts, int(num_experts_per_tok), pretraining_tp, num_shared_experts=num_shared_experts)
 
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),

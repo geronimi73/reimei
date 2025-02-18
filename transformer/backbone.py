@@ -86,7 +86,8 @@ class TransformerBackbone(nn.Module):
                     num_experts_per_tok=n_act,
                     pretraining_tp=params.pretraining_tp,
                     num_shared_experts=n_shared,
-                    attn_drop=params.dropout
+                    attn_drop=params.dropout,
+                    use_expert_choice=params.use_ec
                 ))
 
     def forward(
