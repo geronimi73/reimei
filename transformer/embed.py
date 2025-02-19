@@ -188,3 +188,22 @@ class PatchEmbed(nn.Module):
         x = self.proj(x)  # (B, C, H, W) -> (B, E, H', W')
         return x.flatten(2).transpose(1, 2)  # (B, E, H', W') -> (B, H'*W', E)
     
+class SemanticCompressor(nn.Module):
+    def __init__(self, in_channels, embed_dim, patch_size):
+        super().__init__()
+        self.patch_size = patch_size if isinstance(patch_size, tuple) else (patch_size, patch_size)
+        self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.mlp = MLPEmbedder(embed_dim, embed_dim, hidden_dim=embed_dim*4, num_layers=2)
+
+    def forward(self, x):
+        _, _, H, W = x.shape
+        new_H = (H // self.patch_size[0]) * self.patch_size[0]
+        new_W = (W // self.patch_size[1]) * self.patch_size[1]
+        x = x[:, :, :new_H, :new_W]  # Crop the image to be divisible by patch_size
+        x = self.proj(x)  # Apply Conv2d
+        _, _, H, W = x.shape
+        x = x.flatten(2).transpose(1, 2)  # Reshape to (B, H'*W', E)
+        x = self.mlp(x)
+        # Turn it back to (B, E, H', W')
+        x = x.transpose(1, 2).reshape(x.shape[0], -1, H, W)
+        return x
