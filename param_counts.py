@@ -2,19 +2,21 @@ import torch
 
 # 1) Define your parameters.
 from transformer.reimei import ReiMeiParameters, ReiMei
-from transformer.moedit import SparseMoeBlock
+# from transformer.moedit import SparseMoeBlock
+
 params = ReiMeiParameters(
-    channels=4,
-    patch_size=(2,2),
+    use_mmdit=True,
+    use_ec=True,
+    channels=32,
+    patch_size=(1,1),
     embed_dim=768,
-    num_layers=12,
-    num_heads=768//64,
-    mlp_dim=768*4,
+    num_layers=4,
+    num_heads=(768 // 64),
     siglip_dim=1152,
     bert_dim=1024,
-    num_experts=8,
+    num_experts=4,
     capacity_factor=2.0,
-    shared_experts=1,
+    shared_experts=2,
     dropout=0.1,
     token_mixer_layers=2,
     image_text_expert_ratio=4,
@@ -40,22 +42,24 @@ sum_diff = 0.0
 num_moe_blocks = 0
 
 for name, submodule in model.named_modules():
-    if isinstance(submodule, SparseMoeBlock):
-        # Count all params in this MoE block
-        block_total = count_trainable_params(submodule)
+    block_total = count_trainable_params(submodule)
+    print(f"{name}: {block_total}")
+    # if isinstance(submodule, SparseMoeBlock):
+    #     # Count all params in this MoE block
+    #     block_total = count_trainable_params(submodule)
 
-        # f_c = capacity factor from the gate
-        # E   = submodule.num_experts
-        # The user-provided formula:
-        #   active = (block_total / E) * f_c
-        # This is a simplification! But we'll follow the user’s request.
-        E   = getattr(submodule, "num_experts", 1)
-        f_c = getattr(submodule, "f_c", 1.0)
+    #     # f_c = capacity factor from the gate
+    #     # E   = submodule.num_experts
+    #     # The user-provided formula:
+    #     #   active = (block_total / E) * f_c
+    #     # This is a simplification! But we'll follow the user’s request.
+    #     E   = getattr(submodule, "num_experts", 1)
+    #     f_c = getattr(submodule, "f_c", 1.0)
 
-        block_active = block_total / E * f_c
-        diff = block_total - block_active
-        sum_diff += diff
-        num_moe_blocks += 1
+    #     block_active = block_total / E * f_c
+    #     diff = block_total - block_active
+    #     sum_diff += diff
+    #     num_moe_blocks += 1
 
         # print(f"\nSparseMoeBlock '{name}':")
         # print(f"  - total params:  {block_total:,.0f}")

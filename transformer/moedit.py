@@ -8,9 +8,6 @@ import numpy as np
 import math
 import torch.nn.functional as F
 
-from transformer.utils import remove_masked_tokens
-from transformer.embed import rope_1d, rope_2d
-
 #################################################################################
 #                                MoE Layer.                                     #
 #################################################################################
@@ -439,8 +436,7 @@ class DiTBlock(nn.Module):
 
 class DoubleStreamBlock(nn.Module):
     """
-    A DiT block with MoE for text & image, plus separate 1D & 2D RoPE application
-    and joint attention. Similar to flux implementation, but with MoE instead of MLP.
+    A DiT block with seperate MoE for text & image
     """
     def __init__(
         self,
@@ -565,7 +561,7 @@ class DoubleStreamBlock(nn.Module):
 class SingleStreamBlock(nn.Module):
     """
     A DiT "single-stream" block with:
-      - separate text/image QKV + RoPE
+      - separate text/image QKV
       - a single cross-attention pass over concatenated sequences
       - Sparse MoE in place of the original MLP
     """

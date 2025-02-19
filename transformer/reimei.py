@@ -61,7 +61,7 @@ class ReiMei(nn.Module):
     """
     def __init__(self, params: ReiMeiParameters):
         super().__init__()
-        
+        self.params = params
         self.embed_dim = params.embed_dim
         self.head_dim = params.embed_dim // params.num_heads
         self.channels = params.channels
@@ -85,18 +85,22 @@ class ReiMei(nn.Module):
         # self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
 
         # TokenMixer
-        token_mixer_params = TokenMixerParameters(
-            use_mmdit=params.use_mmdit,
-            use_ec=params.use_ec,
-            embed_dim=self.embed_dim,
-            num_heads=params.num_heads,
-            num_layers=params.token_mixer_layers,
-            num_experts=params.num_experts,
-            capacity_factor=params.capacity_factor,
-            num_shared_experts=params.shared_experts,
-            exp_ratio=params.image_text_expert_ratio,
-        )
-        self.token_mixer = TokenMixer(token_mixer_params)
+        if params.token_mixer_layers > 0:
+            self.use_token_mixer = True
+            token_mixer_params = TokenMixerParameters(
+                use_mmdit=params.use_mmdit,
+                use_ec=params.use_ec,
+                embed_dim=self.embed_dim,
+                num_heads=params.num_heads,
+                num_layers=params.token_mixer_layers,
+                num_experts=params.num_experts,
+                capacity_factor=params.capacity_factor,
+                num_shared_experts=params.shared_experts,
+                exp_ratio=params.image_text_expert_ratio,
+            )
+            self.token_mixer = TokenMixer(token_mixer_params)
+        else:
+            self.use_token_mixer = False
 
         # Backbone transformer model
         backbone_params = BackboneParams(
@@ -215,7 +219,8 @@ class ReiMei(nn.Module):
         img = img + sincos_2d_pe
 
         # Token-mixer
-        img, txt = self.token_mixer(img, txt, vec)
+        if self.use_token_mixer:
+            img, txt = self.token_mixer(img, txt, vec)
 
         # Remove masked patches
         if img_mask is not None:
@@ -253,10 +258,10 @@ class ReiMei(nn.Module):
 
             vc = self(z, t, sig_emb, sig_vec, bert_emb, bert_vec, None, None).to(torch.bfloat16)
             if cfg != 1.0:
-                null_sig_emb = torch.zeros(b, 1, 1152).to(z.device, torch.bfloat16)
-                null_sig_vec = torch.zeros(b, 1152).to(z.device, torch.bfloat16)
-                null_bert_emb = torch.zeros(b, 1, 1024).to(z.device, torch.bfloat16)
-                null_bert_vec = torch.zeros(b, 1024).to(z.device, torch.bfloat16)
+                null_sig_emb = torch.zeros(b, 1, self.params.siglip_dim).to(z.device, torch.bfloat16)
+                null_sig_vec = torch.zeros(b, self.params.siglip_dim).to(z.device, torch.bfloat16)
+                null_bert_emb = torch.zeros(b, 1, self.params.bert_dim).to(z.device, torch.bfloat16)
+                null_bert_vec = torch.zeros(b, self.params.bert_dim).to(z.device, torch.bfloat16)
                 vu = self(z, t, null_sig_emb, null_sig_vec, null_bert_emb, null_bert_vec, None, None)
                 vc = vu + cfg * (vc - vu)
 

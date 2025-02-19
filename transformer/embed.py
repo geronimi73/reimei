@@ -136,7 +136,7 @@ class TimestepEmbedder(nn.Module):
     """
     def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()
-        self.mlp = MLPEmbedder(frequency_embedding_size, hidden_size)
+        self.mlp = MLPEmbedder(frequency_embedding_size, hidden_size, num_layers=1)
         self.frequency_embedding_size = frequency_embedding_size
 
     @staticmethod
@@ -170,7 +170,7 @@ class OutputLayer(nn.Module):
     def __init__(self, in_dim: int, out_dim: int):
         super().__init__()
         self.norm_final = nn.LayerNorm(in_dim, elementwise_affine=False, eps=1e-6)
-        self.mlp = MLPEmbedder(in_dim, out_dim, hidden_dim=in_dim*4, num_layers=4)
+        self.mlp = MLPEmbedder(in_dim, out_dim, hidden_dim=in_dim*4, num_layers=3)
         self.adaLN_modulation = nn.Sequential(nn.GELU(), nn.Linear(in_dim, 2 * in_dim, bias=True))
 
     def forward(self, x: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
@@ -191,10 +191,19 @@ class PatchEmbed(nn.Module):
 class SemanticCompressor(nn.Module):
     def __init__(self, in_channels, embed_dim, patch_size):
         super().__init__()
-        self.proj = PatchEmbed(in_channels, embed_dim, patch_size)
+        self.patch_size = patch_size if isinstance(patch_size, tuple) else (patch_size, patch_size)
+        self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
         self.mlp = MLPEmbedder(embed_dim, embed_dim, hidden_dim=embed_dim*4, num_layers=2)
 
     def forward(self, x):
-        x = self.proj(x)
+        _, _, H, W = x.shape
+        new_H = (H // self.patch_size[0]) * self.patch_size[0]
+        new_W = (W // self.patch_size[1]) * self.patch_size[1]
+        x = x[:, :, :new_H, :new_W]  # Crop the image to be divisible by patch_size
+        x = self.proj(x)  # Apply Conv2d
+        _, _, H, W = x.shape
+        x = x.flatten(2).transpose(1, 2)  # Reshape to (B, H'*W', E)
         x = self.mlp(x)
+        # Turn it back to (B, E, H', W')
+        x = x.transpose(1, 2).reshape(x.shape[0], -1, H, W)
         return x
