@@ -1,4 +1,5 @@
 from copy import deepcopy
+import json
 import random
 import torch
 from dataset.shapebatching_dataset import ShapeBatchingDataset
@@ -40,16 +41,16 @@ def sample_images(model, vae, noise, sig_emb, sig_vec, bert_emb, bert_vec):
     return grid
 
 def get_dataset(bs, seed, device, num_workers=16):
-    # ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", split="train", streaming=True)
-    ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=num_workers, split="train")
-    ds = ds.to_iterable_dataset(1000)
+    ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", split="train", streaming=True)
+    # ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=num_workers, split="train")
+    # ds = ds.to_iterable_dataset(1000)
     siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device, DTYPE)
     siglip_tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
-    bert_model = ModernBertModel.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert").to(device, DTYPE)
-    bert_tokenizer = AutoTokenizer.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert")
+    # bert_model = ModernBertModel.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert").to(device, DTYPE)
+    # bert_tokenizer = AutoTokenizer.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert")
     
     # ds = ShapeBatchingDataset(ds, bs, device, num_workers, shuffle=True, seed=seed)
-    ds = ShapeBatchingDataset(ds, bs, siglip_tokenizer, siglip_model, bert_tokenizer, bert_model, device, num_workers, shuffle=True, seed=seed)
+    ds = ShapeBatchingDataset(ds, bs, siglip_tokenizer, siglip_model, None, None, device, num_workers, shuffle=True, seed=seed)
     return ds
 
 class MemmapDataset(Dataset):
@@ -67,14 +68,55 @@ class MemmapDataset(Dataset):
         
         return sample
     
+
+class ImageNetDataset(Dataset):
+    def __init__(self, data_path, labels_path=None):
+        self.data = np.memmap(data_path, dtype='uint8', mode='r', shape=(1281152, 4096))
+        with open(labels_path, 'r') as f:
+            self.labels = json.load(f)
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        image = self.data[idx]
+        label, label_text = self.labels[idx]
+        image = image.astype(np.float32).reshape(4, 32, 32)
+        image = (image / 255.0 - 0.5) * 24.0
+        return image, label, label_text
+    
 class InfiniteDataLoader:
     def __init__(self, dataset):
         self.dataset = dataset
+        self.siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device, DTYPE)
+        self.siglip_tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
+        self.device = "cuda"
 
     def __iter__(self):
         while True:
-            for batch in self.dataset:
+            for images, labels, ltxt in self.dataset:
+                captions = [ltxt[i] for i in range(len(ltxt))]
+                siglip_emb, siglip_vec = self.encode(captions)
+                batch = {
+                    'ae_latent': images,
+                    'siglip_emb': siglip_emb,
+                    'siglip_vec': siglip_vec,
+                    'bert_emb': torch.zeros(len(images), 1, BERT_EMBED_DIM).to(device, dtype=DTYPE),
+                    'bert_vec': torch.zeros(len(images), BERT_EMBED_DIM).to(device, dtype=DTYPE),
+                }
                 yield batch
+
+    @torch.no_grad
+    def encode(self, captions):
+        bs = len(captions)
+
+        # Encode the captions
+        s_tokens = self.siglip_tokenizer(captions, padding='longest', truncation=True, return_tensors="pt").to(self.device)
+        siglip_outputs = self.siglip_model(**s_tokens, output_hidden_states=True)
+        siglip_embedding = siglip_outputs.hidden_states[-1]
+        siglip_vec = siglip_outputs.pooler_output
+
+        return siglip_embedding, siglip_vec
 
 def batch_to_tensors(batch):
     latents = batch["latent"]
@@ -90,16 +132,16 @@ if __name__ == "__main__":
     # torch.set_float32_matmul_precision('high')
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    embed_dim = 1152
-    patch_size = (1,1)
+    embed_dim = 512
+    patch_size = (2,2)
 
     params = ReiMeiParameters(
-        use_mmdit=True,
+        use_mmdit=False,
         use_ec=True,
         channels=AE_CHANNELS,
         patch_size=patch_size,
         embed_dim=embed_dim,
-        num_layers=12,
+        num_layers=4,
         num_heads=(embed_dim // 64),
         siglip_dim=SIGLIP_EMBED_DIM,
         bert_dim=BERT_EMBED_DIM,
@@ -117,14 +159,14 @@ if __name__ == "__main__":
     model = ReiMei(params).to(DTYPE)
 
     print("Number of parameters: ", sum(p.numel() for p in model.parameters()))
-
-    print("Starting training...")
     
-    dataset = get_dataset(BS, SEED + accelerator.process_index, device=device, num_workers=1)
+    # dataset = get_dataset(BS, SEED + accelerator.process_index, device=device, num_workers=5)
     # ds = MemmapDataset(f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth")
     # ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=16, split="train").to_iterable_dataset(1000)
-    # dataset = DataLoader(ds, batch_size=BS, num_workers=0)
-    # dataset = InfiniteDataLoader(dataset)
+    ds = ImageNetDataset(f"{DS_DIR_BASE}/imagenet.int8/inet.npy", f"{DS_DIR_BASE}/imagenet.int8/inet.json")
+    dataset = DataLoader(ds, batch_size=BS, shuffle=True, num_workers=4)
+    dataset = InfiniteDataLoader(dataset)
+
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.01)
 
@@ -141,19 +183,22 @@ if __name__ == "__main__":
     # del checkpoint
     
     if accelerator.is_main_process:
-        ae = AutoencoderDC.from_pretrained(f"mit-han-lab/{AE_HF_NAME}", torch_dtype=DTYPE, cache_dir=f"{MODELS_DIR_BASE}/dc_ae", revision="main").to(device).eval()
-        # ae =  AutoencoderKL.from_pretrained(f"{AE_HF_NAME}", cache_dir=f"{MODELS_DIR_BASE}/vae").to(device=device, dtype=DTYPE).eval()
+        # ae = AutoencoderDC.from_pretrained(f"mit-han-lab/{AE_HF_NAME}", torch_dtype=DTYPE, cache_dir=f"{MODELS_DIR_BASE}/dc_ae", revision="main").to(device).eval()
+        ae =  AutoencoderKL.from_pretrained(f"{AE_HF_NAME}", cache_dir=f"{MODELS_DIR_BASE}/vae").to(device=device, dtype=DTYPE).eval()
         assert ae.config.scaling_factor == AE_SCALING_FACTOR, f"Scaling factor mismatch: {ae.config.scaling_factor} != {AE_SCALING_FACTOR}"
         
         os.makedirs("logs", exist_ok=True)
         os.makedirs("models", exist_ok=True)
 
-        noise = torch.randn(4, AE_CHANNELS, 9, 9).to(device, dtype=DTYPE)
+        noise = torch.randn(4, AE_CHANNELS, 32, 32).to(device, dtype=DTYPE)
         example_batch = next(iter(dataset))
 
         # example_latents = example_batch.to(device, dtype=DTYPE)[:4]
 
         example_latents = example_batch["ae_latent"][:4].to(device, dtype=DTYPE)
+        ex_sig_emb = example_batch["siglip_emb"][:4].to(device, dtype=DTYPE)
+        ex_sig_vec = example_batch["siglip_vec"][:4].to(device, dtype=DTYPE)
+        
         # example_captions = example_batch["caption"][:4]
 
         with torch.no_grad():
@@ -169,16 +214,18 @@ if __name__ == "__main__":
         del grid, example_ground_truth, example_latents
 
         # example_captions = ["a green field with green bushes", "bright blue sky with clouds", "a red apple on a wooden table", "a field of green grass with a snowcapped mountain in the background"]
-        example_captions = ["a cheeseburger on a black plate and cutlery", "a bright yellow banana on a wooden table", "a white cup on a glass table", "a volcano with a yellow sunset sky"]
-        ex_sig_emb, ex_sig_vec, ex_bert_emb, ex_bert_vec = dataset.encode(example_captions)
+        # example_captions = ["cheeseburger", "banana", "cup", "volcano"]
+        # ex_sig_emb, ex_sig_vec = dataset.encode(example_captions)
         
         # ex_sig_emb = torch.zeros(4, 1, 1152).to(device, dtype=DTYPE)
         # ex_sig_vec = torch.zeros(4, 1152).to(device, dtype=DTYPE)
-        # ex_bert_emb = torch.zeros(4, 1, 1024).to(device, dtype=DTYPE)
-        # ex_bert_vec = torch.zeros(4, 1024).to(device, dtype=DTYPE)
+        ex_bert_emb = torch.zeros(4, 1, 1024).to(device, dtype=DTYPE)
+        ex_bert_vec = torch.zeros(4, 1024).to(device, dtype=DTYPE)
 
         ae = ae.to("cpu")
         losses = []
+
+    print("Starting training...")
 
     progress_bar = tqdm(train_dataloader, leave=False, total=TRAIN_STEPS)
     for batch_idx, batch in enumerate(progress_bar):
@@ -189,10 +236,6 @@ if __name__ == "__main__":
 
         bs, c, h, w = latents.shape
         latents = latents * AE_SCALING_FACTOR
-
-        # if batch_idx % 200 == 0:
-            # print("Batch Latents std dev mean", torch.std_mean(latents))
-
         # siglip_emb = torch.zeros(bs, 1, 1152).to(device, dtype=DTYPE)
         # siglip_vec = torch.zeros(bs, 1152).to(device, dtype=DTYPE)
         bert_emb = torch.zeros(bs, 1, 1024).to(device, dtype=DTYPE)
@@ -239,7 +282,7 @@ if __name__ == "__main__":
 
         del mse, loss, vtheta
 
-        if batch_idx % 200 == 0:
+        if batch_idx % 1000 == 0:
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
                 model.eval()

@@ -196,7 +196,7 @@ class ReiMei(nn.Module):
         patched_h, patched_w = height // ps_h, width // ps_w
 
         # Text embeddings
-        sig_txt = self.siglip_embedder(sig_txt)
+        # sig_txt = self.siglip_embedder(sig_txt)
         # bert_txt = self.bert_embedder(self.bert_norm(bert_txt))
         # txt = torch.cat([sig_txt, bert_txt], dim=1)
         txt = sig_txt
@@ -205,6 +205,7 @@ class ReiMei(nn.Module):
 
         # Vector embedding (timestep + vector_embeddings)
         time = self.time_embedder(time)
+        # vec = time
 
         vec = self.siglip_embedder(sig_vec) + time
         # vec = torch.cat([sig_vec, self.bert_norm(bert_vec)], dim=1)
