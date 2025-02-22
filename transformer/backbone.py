@@ -1,5 +1,5 @@
 import torch
-from transformer.moedit import DoubleStreamBlock, SingleStreamBlock, DiTBlock
+from transformer.dit import DoubleStreamBlock, SingleStreamBlock, DiTBlock
 from torch import nn
 from dataclasses import dataclass
 
@@ -32,7 +32,11 @@ class TransformerBackbone(nn.Module):
         mf_min, mf_max = 1.0, 4.0
         self.use_mmdit = params.use_mmdit
         
-        self.layers = nn.ModuleList()
+        if params.use_mmdit:
+            self.double_layers = nn.ModuleList()
+            self.single_layers = nn.ModuleList()
+        else:
+            self.layers = nn.ModuleList()
         for i in range(params.num_layers):
             # Calculate scaling factors for the i-th layer using linear interpolation
             mf = mf_min + (mf_max - mf_min) * i / (params.num_layers - 1)
@@ -40,7 +44,7 @@ class TransformerBackbone(nn.Module):
             # Scale the dimensions according to the scaling factors
             scaled_mlp_dim = (int(params.embed_dim * mf) // params.num_heads) * params.num_heads
             scaled_num_heads = params.num_heads
-            mlp_ratio = max(1, int(scaled_mlp_dim / params.embed_dim))
+            mlp_dim = max(params.embed_dim, scaled_mlp_dim)
 
             if i % 2 == 0:  # Even layers use regular DiT (no MoE)
                 n_exp = 1
@@ -53,10 +57,10 @@ class TransformerBackbone(nn.Module):
             
             if params.use_mmdit:
                 if i < params.num_layers // 2: # First half uses DoubleStreamBlock
-                    self.layers.append(DoubleStreamBlock(
+                    self.double_layers.append(DoubleStreamBlock(
                         hidden_size=params.embed_dim,
                         num_heads=scaled_num_heads,
-                        mlp_ratio=mlp_ratio,
+                        mlp_dim=mlp_dim,
                         num_experts=n_exp,
                         capacity_factor=n_act,
                         pretraining_tp=params.pretraining_tp,
@@ -66,22 +70,17 @@ class TransformerBackbone(nn.Module):
                         use_expert_choice=params.use_ec,
                     ))
                 else:  # Second half uses SingleStreamBlock
-                    self.layers.append(SingleStreamBlock(
+                    self.single_layers.append(SingleStreamBlock(
                         hidden_size=params.embed_dim,
                         num_heads=scaled_num_heads,
-                        mlp_ratio=mlp_ratio,
-                        num_experts=n_exp,
-                        capacity_factor=n_act,
-                        pretraining_tp=params.pretraining_tp,
-                        num_shared_experts=n_shared,
-                        dropout=params.dropout,
-                        use_expert_choice=params.use_ec,
+                        mlp_dim=mlp_dim,
+
                     ))
             else:
                 self.layers.append(DiTBlock(
                     hidden_size=params.embed_dim,
                     num_heads=scaled_num_heads,
-                    mlp_ratio=mlp_ratio,
+                    mlp_dim=mlp_dim,
                     num_experts=n_exp,
                     num_experts_per_tok=n_act,
                     pretraining_tp=params.pretraining_tp,
@@ -92,14 +91,20 @@ class TransformerBackbone(nn.Module):
 
     def forward(
             self, 
-            x: torch.Tensor,
-            text: torch.Tensor,
+            img: torch.Tensor,
+            txt: torch.Tensor,
             vec: torch.Tensor,
+            pe: torch.Tensor = None,
             ):
-        for layer in self.layers:
-            if self.use_mmdit:
-                x, text = layer(x, text, vec)
-            else:
-                x = layer(x, vec)
-
-        return x
+        if self.use_mmdit:
+            for layer in self.double_layers:
+                img, txt = layer(img, txt, vec, pe)
+            img = torch.cat((txt, img), 1)
+            for layer in self.single_layers:
+                img = layer(img, vec, pe)
+            
+            img = img[:, txt.shape[1]:, ...]
+        else:
+            for layer in self.layers:
+                img = layer(img, vec)
+        return img

@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import math
 
+from transformer.math import rope
+
 def rope_1d(dim: int, seq_len: int, base: float = 10000.0) -> torch.Tensor:
     """
     Returns a [seq_len, dim] 1D rotary embedding (cos/sin interleaved).
@@ -187,3 +189,19 @@ class PatchEmbed(nn.Module):
     def forward(self, x):
         x = self.proj(x)  # (B, C, H, W) -> (B, E, H', W')
         return x.flatten(2).transpose(1, 2)  # (B, E, H', W') -> (B, H'*W', E)
+    
+class EmbedND(nn.Module):
+    def __init__(self, dim: int, theta: int = 10_000, axes_dim: list[int] = [16, 56, 56]):
+        super().__init__()
+        self.dim = dim
+        self.theta = theta
+        self.axes_dim = axes_dim
+
+    def forward(self, ids: torch.Tensor) -> torch.Tensor:
+        n_axes = ids.shape[-1]
+        emb = torch.cat(
+            [rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(n_axes)],
+            dim=-3,
+        )
+
+        return emb.unsqueeze(1)

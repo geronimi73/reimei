@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
-from transformer.moedit import DoubleStreamBlock, DiTBlock
+from transformer.dit import DoubleStreamBlock, DiTBlock
 
 @dataclass
 class TokenMixerParameters:
@@ -38,7 +38,7 @@ class TokenMixer(nn.Module):
                 DoubleStreamBlock(
                     hidden_size=params.embed_dim,
                     num_heads=params.num_heads,
-                    mlp_ratio=params.mlp_ratio,
+                    mlp_dim=params.mlp_ratio * params.embed_dim,
                     num_experts=params.num_experts,
                     capacity_factor=params.capacity_factor,
                     pretraining_tp=params.pretraining_tp,
@@ -53,7 +53,7 @@ class TokenMixer(nn.Module):
                 DiTBlock(
                     hidden_size=params.embed_dim,
                     num_heads=params.num_heads,
-                    mlp_ratio=params.mlp_ratio,
+                    mlp_dim=params.mlp_ratio * params.embed_dim,
                     num_experts=params.num_experts,
                     num_experts_per_tok=params.capacity_factor,
                     pretraining_tp=params.pretraining_tp,
@@ -63,21 +63,18 @@ class TokenMixer(nn.Module):
                 for _ in range(params.num_layers)
             ])
 
-
-
     def forward(
         self,
         img: torch.Tensor,       # [B, L_img, embed_dim]
         txt: torch.Tensor,       # [B, L_txt, embed_dim]
         vec: torch.Tensor,       # [B, embed_dim]
+        pe: torch.Tensor = None,    # rope positional encoding
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Passes (img, txt) through each DiTBlock in sequence. Each DiTBlock performs
-        cross-attention over the concatenation of (img, txt), plus MoE-based feedforwards.
-        """
-        for layer in self.layers:
-            if self.use_mmdit:
-                img, txt = layer(img, txt, vec)
-            else:
+        if self.use_mmdit:
+            for layer in self.layers:
+                img, txt = layer(img, txt, vec, pe)
+        else:
+            for layer in self.layers:
                 img = layer(img, vec)
+
         return img, txt

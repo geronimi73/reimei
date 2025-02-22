@@ -86,9 +86,11 @@ class ShapeBatchingDataset(IterableDataset):
 
 
         # if bool(random.getrandbits(1)):
-        siglip_embedding, siglip_vec, _, _= self.encode_siglip(samples["caption"])
+        # siglip_embedding, siglip_vec, _, _= self.encode_siglip(samples["caption"])
         # else:
         # _, _, bert_embedding, bert_vec = self.encode_bert(samples["caption"])
+
+        siglip_embedding, siglip_vec, bert_embedding, bert_vec = self.encode(samples["caption"])
 
         batch = {
             'caption': samples["caption"],
@@ -97,8 +99,8 @@ class ShapeBatchingDataset(IterableDataset):
             'ae_latent_shape': latent_shape,
             'siglip_emb': siglip_embedding,
             'siglip_vec': siglip_vec,
-            # 'bert_emb': bert_embedding,
-            # 'bert_vec': bert_vec,
+            'bert_emb': bert_embedding,
+            'bert_vec': bert_vec,
         }
         return batch
 

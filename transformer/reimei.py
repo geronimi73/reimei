@@ -1,8 +1,9 @@
 import math
 import torch.nn as nn
 from torch.nn.modules.normalization import RMSNorm
-from transformer.moedit import MoeMLP
-from .embed import PatchEmbed, rope_1d, rope_2d, sincos_1d, sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
+from transformer.math import rope_ids
+from transformer.moe import MoeMLP
+from .embed import EmbedND, PatchEmbed, rope_1d, rope_2d, sincos_1d, sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
 from .utils import remove_masked_tokens, add_masked_tokens, unpatchify
 from .backbone import BackboneParams, TransformerBackbone
 from .token_mixer import TokenMixer, TokenMixerParameters
@@ -83,6 +84,8 @@ class ReiMei(nn.Module):
     
         # Vector (y) embedding
         # self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
+
+        self.rope_embedder = EmbedND(dim=self.head_dim)
 
         # TokenMixer
         if params.token_mixer_layers > 0:
@@ -196,7 +199,7 @@ class ReiMei(nn.Module):
         patched_h, patched_w = height // ps_h, width // ps_w
 
         # Text embeddings
-        # sig_txt = self.siglip_embedder(sig_txt)
+        sig_txt = self.siglip_embedder(sig_txt)
         # bert_txt = self.bert_embedder(self.bert_norm(bert_txt))
         # txt = torch.cat([sig_txt, bert_txt], dim=1)
         txt = sig_txt
@@ -215,22 +218,31 @@ class ReiMei(nn.Module):
         img = self.image_embedder(img)
 
         # (height // patch_size_h, width // patch_size_w, embed_dim)
-        sincos_2d_pe = sincos_2d(self.embed_dim, patched_h, patched_w)
-        sincos_2d_pe = sincos_2d_pe.to(device=img.device, dtype=img.dtype).unsqueeze(0).expand(batch_size, -1, -1)
-        img = img + sincos_2d_pe
+        # sincos_2d_pe = sincos_2d(self.embed_dim, patched_h, patched_w)
+        # sincos_2d_pe = sincos_2d_pe.to(device=img.device, dtype=img.dtype).unsqueeze(0).expand(batch_size, -1, -1)
+        # img = img + sincos_2d_pe
+
+        rope_id = rope_ids(batch_size, patched_h, patched_w, seq_len, img.device, img.dtype)
+        rope_pe = self.rope_embedder(torch.cat(rope_id, dim=1))
 
         # Token-mixer
         if self.use_token_mixer:
-            img, txt = self.token_mixer(img, txt, vec)
+            img, txt = self.token_mixer(img, txt, vec, rope_pe)
 
         # Remove masked patches
+        txt_rope_id, img_rope_id = rope_id
         if img_mask is not None:
             img = remove_masked_tokens(img, img_mask)
+            img_rope_id = remove_masked_tokens(img_rope_id, img_mask)
+
         if txt_mask is not None:
             txt = remove_masked_tokens(txt, txt_mask)
+            txt_rope_id = remove_masked_tokens(txt_rope_id, txt_mask)
+
+        rope_pe = self.rope_embedder(torch.cat((txt_rope_id, img_rope_id), dim=1))
 
         # Backbone transformer model
-        img = self.backbone(img, txt, vec)
+        img = self.backbone(img, txt, vec, rope_pe)
 
         # Final output layer
         # (bs, unmasked_num_tokens, embed_dim) -> (bs, unmasked_num_tokens, in_channels)
