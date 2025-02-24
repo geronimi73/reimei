@@ -84,6 +84,7 @@ class ReiMei(nn.Module):
     
         # Vector (y) embedding
         # self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
+        self.vector_embedder = MLPEmbedder(params.siglip_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
 
         self.rope_embedder = EmbedND(dim=self.head_dim)
 
@@ -127,7 +128,7 @@ class ReiMei(nn.Module):
     def initialize_weights(self):
         s = 1.0 / math.sqrt(self.embed_dim)
 
-        # Initialize all linear layers and biases
+        # # Initialize all linear layers and biases
         # def _basic_init(module):
         #     if isinstance(module, nn.LayerNorm):
         #         if module.weight is not None:
@@ -139,7 +140,7 @@ class ReiMei(nn.Module):
         #         if module.bias is not None:
         #             nn.init.constant_(module.bias, 0)
 
-        # Initialize all linear layers and biases
+        # # Initialize all linear layers and biases
         # def _basic_init(module):
         #     if isinstance(module, nn.Linear):
         #         nn.init.xavier_uniform_(module.weight)
@@ -160,27 +161,6 @@ class ReiMei(nn.Module):
 
         # # Apply basic initialization to all modules
         # self.apply(_basic_init)
-
-        # def _mlp_embedder_init(module):
-        #     if isinstance(module, MLPEmbedder):
-        #         # First linear layer: use Kaiming uniform for layers followed by GELU.
-        #         nn.init.xavier_uniform_(module.mlp[0].weight)
-        #         if module.mlp[0].bias is not None:
-        #             nn.init.constant_(module.mlp[0].bias, 0)
-        #         # Second linear layer: use Xavier uniform.
-        #         nn.init.xavier_uniform_(module.mlp[2].weight)
-        #         if module.mlp[2].bias is not None:
-        #             nn.init.constant_(module.mlp[2].bias, 0)
-
-        # self.apply(_mlp_embedder_init)
-
-        # def _moe_mlp_init(module):
-        #     if isinstance(module, MoeMLP):
-        #         nn.init.xavier_uniform_(module.gate_proj.weight)
-        #         nn.init.xavier_uniform_(module.up_proj.weight)
-        #         nn.init.xavier_uniform_(module.down_proj.weight)
-
-        # self.apply(_moe_mlp_init)
 
         # Zero-out the last linear layer in the output to ensure initial predictions are zero
         nn.init.constant_(self.output_layer.mlp.mlp[-1].weight, 0)
@@ -210,7 +190,7 @@ class ReiMei(nn.Module):
         time = self.time_embedder(time)
         # vec = time
 
-        vec = self.siglip_embedder(sig_vec) + time
+        vec = self.vector_embedder(sig_vec) + time
         # vec = torch.cat([sig_vec, self.bert_norm(bert_vec)], dim=1)
         # vec = self.vector_embedder(vec) + time  # (batch_size, embed_dim)
 

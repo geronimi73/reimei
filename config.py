@@ -2,7 +2,8 @@ USERNAME = "SwayStar123"
 # DATASET_NAME = "FFHQ_1024_DC-AE_f32"
 # DATASET_NAME = "pruned_preprocessed_commoncatalog-cc-by_DCAE"
 # DATASET_NAME = "preprocessed_commoncatalog-cc-by"
-DATASET_NAME = "imagenet_288_dcae_fp8_captions"
+# DATASET_NAME = "imagenet_288_dcae_fp8_captions"
+DATASET_NAME = "g-ronimo/IN1k96-augmented-latents_dc-ae-f32c32-sana-1.0"
 DS_DIR_BASE = "../../datasets"
 MODELS_DIR_BASE = "../../models"
 # AE_SCALING_FACTOR = 0.13025 # sdxl-vae-fp16-fix
@@ -10,23 +11,26 @@ MODELS_DIR_BASE = "../../models"
 AE_SCALING_FACTOR = 0.41407 # f32-c32-sana-1.1
 # AE_SCALING_FACTOR = 0.4552 # f32-c32-mix-1.0
 
-BS = 40
+BS = 256
 TRAIN_STEPS = 300_000
 MASK_RATIO = 0.75 # Percent to mask
 CFG_RATIO = 0.8 # Percent to not drop
-SEED = 42
+MAX_CAPTION_LEN = 32 # Token length to encode
 
-LR = 0.0001
+LR = 0.00005
 
 # AE_HF_NAME = "madebyollin/sdxl-vae-fp16-fix"
 # AE_HF_NAME = "dc-ae-f32c32-in-1.0-diffusers"
-AE_HF_NAME = "dc-ae-f32c32-sana-1.1-diffusers"
+# AE_HF_NAME = "dc-ae-f32c32-sana-1.1-diffusers"
 # AE_HF_NAME = "dc-ae-f32c32-mix-1.0-diffusers"
+AE_HF_NAME = "dc-ae-f32c32-sana-1.0-diffusers"
 AE_CHANNELS = 32
 SIGLIP_HF_NAME = "google/siglip-so400m-patch14-384"
 SIGLIP_EMBED_DIM = 1152
 BERT_HF_NAME = "answerdotai/ModernBERT-large"
 BERT_EMBED_DIM = 1024
+
+SEED = 42
 
 DIT_G = dict(
     num_layers=40,
