@@ -49,7 +49,7 @@ class Modulation(nn.Module):
 from timm.models.vision_transformer import Attention
 
 def modulate(x, shift, scale):
-    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+    return (x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)).to(x.dtype)
 
 class DiTBlock(nn.Module):
     """
@@ -79,8 +79,8 @@ class DiTBlock(nn.Module):
 
     def forward(self, x, c):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa)) 
-        x = x + gate_mlp.unsqueeze(1) * self.moe(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x).to(x.dtype), shift_msa, scale_msa))
+        x = x + gate_mlp.unsqueeze(1) * self.moe(modulate(self.norm2(x).to(x.dtype), shift_mlp, scale_mlp))
         return x
     
 class SelfAttention(nn.Module):

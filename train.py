@@ -67,8 +67,8 @@ if __name__ == "__main__":
     patch_size = (1,1)
 
     params = ReiMeiParameters(
-        use_mmdit=True,
-        use_ec=False,
+        use_mmdit=False,
+        use_ec=True,
         channels=AE_CHANNELS,
         patch_size=patch_size,
         embed_dim=embed_dim,

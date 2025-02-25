@@ -90,7 +90,7 @@ class EC_MoEGate(nn.Module):
         topk_weight, topk_idx = torch.topk(scores, k=capacity, dim=-1, sorted=False)
         # topk_weight and topk_idx: (B, E, C)
 
-        return topk_idx, topk_weight
+        return topk_idx, topk_weight.to(hidden_states.dtype)
 
 
 class EC_SparseMoeBlock(nn.Module):
