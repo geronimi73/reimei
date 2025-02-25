@@ -43,7 +43,7 @@ def random_mask(bs: int, height: int, width: int, patch_size: tuple[int, int], m
         height (int): Height of the image.
         width (int): Width of the image.
         patch_size (tuple[int, int]): Patch size.
-        mask_ratio (float): Ratio of tokens to mask. Ranges from 0 to 1. mask_ratio * 100 = percentage of 1s in the mask
+        mask_ratio (float): Ratio of tokens to mask. Ranges from 0 to 1. mask_ratio * 100 = percentage of 0s in the mask
 
     Returns:
         mask (torch.Tensor): A tensor of shape (bs, num_tokens) with values in {0, 1}.
@@ -147,3 +147,16 @@ def unpatchify(x, patch_size, height, width):
     reconstructed = reconstructed.permute(0, 3, 1, 2).contiguous()
 
     return reconstructed
+
+def random_cfg_mask(bs, x):
+    """Create a tensor of shape (bs,) with (x*100)% zeros and the rest ones."""
+    num_zeros = int(bs * x)  # Calculate number of zeros
+    num_ones = bs - num_zeros  # Remaining values are ones
+
+    # Create tensor with appropriate number of zeros and ones
+    tensor = torch.cat([torch.zeros(num_zeros), torch.ones(num_ones)])
+
+    # Shuffle to randomize the order
+    tensor = tensor[torch.randperm(bs)]
+
+    return tensor

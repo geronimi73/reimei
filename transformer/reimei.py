@@ -84,7 +84,7 @@ class ReiMei(nn.Module):
     
         # Vector (y) embedding
         # self.vector_embedder = MLPEmbedder(params.siglip_dim + params.bert_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
-        self.vector_embedder = MLPEmbedder(params.siglip_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
+        self.vector_embedder = MLPEmbedder(params.siglip_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=2)
 
         self.rope_embedder = EmbedND(dim=self.head_dim)
 

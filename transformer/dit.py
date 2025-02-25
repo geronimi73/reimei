@@ -161,8 +161,10 @@ class DoubleStreamBlock(nn.Module):
         vec: Tensor,          # conditioning vector => Modulation
         pe: Tensor = None,    # rope positional encoding
     ) -> tuple[Tensor, Tensor]:
+        dtype = img.dtype
         img_mod1, img_mod2 = self.img_mod(vec)
         txt_mod1, txt_mod2 = self.txt_mod(vec)
+
 
         # prepare image for attention
         img_modulated = self.img_norm1(img)
@@ -188,11 +190,11 @@ class DoubleStreamBlock(nn.Module):
 
         # calculate the img bloks
         img = img + img_mod1.gate * self.img_attn.proj(img_attn)
-        img = img + img_mod2.gate * self.img_moe((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift)
+        img = img + img_mod2.gate * self.img_moe(((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift).to(dtype))
 
         # calculate the txt bloks
         txt = txt + txt_mod1.gate * self.txt_attn.proj(txt_attn)
-        txt = txt + txt_mod2.gate * self.txt_moe((1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift)
+        txt = txt + txt_mod2.gate * self.txt_moe(((1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift).to(dtype))
         
         return img, txt
     

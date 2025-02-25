@@ -248,7 +248,7 @@ class TC_MoEGate(nn.Module):
                 aux_loss = (Pi * fi).sum() * self.alpha
         else:
             aux_loss = None
-        return topk_idx, topk_weight, aux_loss
+        return topk_idx, topk_weight.to(hidden_states.dtype), aux_loss
 
 class AddAuxiliaryLoss(torch.autograd.Function):
     """
@@ -299,7 +299,7 @@ class TC_SparseMoeBlock(nn.Module):
             y = torch.empty_like(hidden_states, dtype=hidden_states.dtype)
             for i, expert in enumerate(self.experts): 
                 y[flat_topk_idx == i] = expert(hidden_states[flat_topk_idx == i])
-            y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
+            y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1).to(hidden_states.dtype)
             y =  y.view(*orig_shape)
             y = AddAuxiliaryLoss.apply(y, aux_loss)
         else:

@@ -3,8 +3,10 @@ from torch.utils.data import IterableDataset
 from collections import defaultdict
 import numpy as np
 from torch.utils.data import DataLoader
-from config import MAX_CAPTION_LEN, SIGLIP_EMBED_DIM, BERT_EMBED_DIM
+from config import DATASET_NAME, DS_DIR_BASE, MAX_CAPTION_LEN, MODELS_DIR_BASE, SIGLIP_EMBED_DIM, BERT_EMBED_DIM, SIGLIP_HF_NAME, USERNAME
 import random
+from transformers import SiglipTextModel, SiglipTokenizer
+from datasets import load_dataset
 
 # def custom_collate(batch):
 #     captions = [item['caption'] for item in batch]

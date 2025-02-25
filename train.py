@@ -2,14 +2,14 @@ from copy import deepcopy
 import json
 import random
 import torch
-from dataset.shapebatching_dataset import ShapeBatchingDataset
+from dataset.shapebatching_dataset import ShapeBatchingDataset, get_dataset
 from dataset.inet96 import ImageNet96Dataset
 from transformer.reimei import ReiMei, ReiMeiParameters
 from accelerate import Accelerator
-from config import BERT_EMBED_DIM, BERT_HF_NAME, BS, CFG_RATIO, TRAIN_STEPS, MASK_RATIO, AE_SCALING_FACTOR, AE_CHANNELS, AE_HF_NAME, MODELS_DIR_BASE, DS_DIR_BASE, SEED, SIGLIP_EMBED_DIM, SIGLIP_HF_NAME, USERNAME, DATASET_NAME, LR
+from config import BERT_EMBED_DIM, BERT_HF_NAME, BS, CFG_RATIO, MAX_CAPTION_LEN, TRAIN_STEPS, MASK_RATIO, AE_SCALING_FACTOR, AE_CHANNELS, AE_HF_NAME, MODELS_DIR_BASE, DS_DIR_BASE, SEED, SIGLIP_EMBED_DIM, SIGLIP_HF_NAME, USERNAME, DATASET_NAME, LR
 from config import DIT_S as DIT
 from datasets import load_dataset
-from transformer.utils import random_mask, apply_mask_to_tensor
+from transformer.utils import random_cfg_mask, random_mask, apply_mask_to_tensor
 from tqdm import tqdm
 import datasets
 import torchvision
@@ -21,9 +21,9 @@ from torch.utils.data import Dataset
 from diffusers import AutoencoderDC
 from diffusers import AutoencoderKL
 from torch.optim.lr_scheduler import OneCycleLR
-from transformers import SiglipProcessor
 import wandb
 from torchmetrics.functional.multimodal import clip_score
+from transformers import SiglipModel, SiglipProcessor
 
 DTYPE = torch.bfloat16
 
@@ -47,8 +47,8 @@ def sample_images(model, vae, ds, noise, prompts, sig_emb, sig_vec, bert_emb, be
     cfg_sampled_images = normalize_batch(vae.decode(cfg_sampled_latents).sample)
 
     # Compute SigLIP scores
-    scores = ds.calculate_score(sampled_images, prompts)
-    cfg_scores = ds.calculate_score(cfg_sampled_images, prompts)
+    scores = calculate_score(sampled_images, prompts)
+    cfg_scores = calculate_score(cfg_sampled_images, prompts)
 
     # Log the sampled images
     interleaved = torch.stack([sampled_images, cfg_sampled_images], dim=1).reshape(-1, *sampled_images.shape[1:])
@@ -67,21 +67,21 @@ if __name__ == "__main__":
     patch_size = (1,1)
 
     params = ReiMeiParameters(
-        use_mmdit=False,
-        use_ec=True,
+        use_mmdit=True,
+        use_ec=False,
         channels=AE_CHANNELS,
         patch_size=patch_size,
         embed_dim=embed_dim,
-        num_layers=12,
+        num_layers=4,
         num_heads=(embed_dim // 128),
         siglip_dim=SIGLIP_EMBED_DIM,
         bert_dim=BERT_EMBED_DIM,
-        num_experts=1,
-        capacity_factor=1.0,
-        shared_experts=None,
+        num_experts=32,
+        capacity_factor=4.0,
+        shared_experts=1,
         dropout=0.1,
         token_mixer_layers=1,
-        image_text_expert_ratio=1,
+        image_text_expert_ratio=2,
     )
 
     accelerator = Accelerator()
@@ -99,17 +99,52 @@ if __name__ == "__main__":
         "ae_hf_name": AE_HF_NAME,
         "lr": LR,
         "bs": BS,
+        "CFG_RATIO": CFG_RATIO,
+        "MASK_RATIO": MASK_RATIO,
+        "MAX_CAPTION_LEN": MAX_CAPTION_LEN,
         "params": params,
     })
     
-    # dataset = get_dataset(BS, SEED + accelerator.process_index, device=device, num_workers=1)
+    # dataset = get_dataset(BS, SEED + accelerator.process_index, device=device, dtype=DTYPE, num_workers=1)
     # ds = MemmapDataset(f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth")
     # ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=16, split="train").to_iterable_dataset(1000)
     # ds = ImageNetDataset(f"{DS_DIR_BASE}/imagenet.int8/inet.npy", f"{DS_DIR_BASE}/imagenet.int8/inet.json")
     # dataset = DataLoader(ds, batch_size=BS, shuffle=True, num_workers=1)
     # dataset = InfiniteDataLoader(dataset)
 
-    ds = load_dataset(f"{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=1, split="train")
+    ds = load_dataset(f"{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=1, split="train").to_iterable_dataset(1000)
+
+    siglip_model = SiglipModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device, DTYPE)
+    siglip_processor = SiglipProcessor.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
+
+    @torch.no_grad
+    def encode_siglip(captions):
+        # Encode the captions
+        s_tokens = siglip_processor.tokenizer(captions, padding='longest', truncation=True, return_tensors="pt", max_length=MAX_CAPTION_LEN).to(device)
+        siglip_outputs = siglip_model.text_model(**s_tokens, output_hidden_states=True)
+        siglip_embedding = siglip_outputs.hidden_states[-1]
+        siglip_vec = siglip_outputs.pooler_output
+
+        return siglip_embedding, siglip_vec
+    
+    @torch.no_grad
+    def calculate_score(images, captions):
+        # Tokenize captions
+        text_inputs = siglip_processor.tokenizer(
+            captions, padding='longest', truncation=True, return_tensors="pt", max_length=MAX_CAPTION_LEN
+        ).to(device)
+        
+        # Encode text
+        text_embeddings = siglip_model.get_text_features(**text_inputs, output_hidden_states=True)
+        
+        # Encode images
+        image_inputs = siglip_processor(images=images.to(torch.float32), return_tensors="pt").to(device)
+        image_outputs = siglip_model.get_image_features(**image_inputs)  # [B, D]
+        
+        # Compute cosine similarity
+        scores = torch.nn.functional.cosine_similarity(image_outputs, text_embeddings, dim=-1)
+        return scores
+
     ds = ImageNet96Dataset(ds, BS, device, DTYPE)
 
 
@@ -160,8 +195,8 @@ if __name__ == "__main__":
 
         # example_captions = ["a green field with green bushes", "bright blue sky with clouds", "a red apple on a wooden table", "a field of green grass with a snowcapped mountain in the background"]
         ex_captions = ["a cheeseburger on a white plate", "a bunch of bananas on a wooden table", "a white tea pot on a wooden table", "an erupting volcano with lava pouring out"]
-        ex_sig_emb, ex_sig_vec= ds.encode_siglip(ex_captions)
-        
+        ex_sig_emb, ex_sig_vec= encode_siglip(ex_captions)
+
         # ex_sig_emb = torch.zeros(4, 1, 1152).to(device, dtype=DTYPE)
         # ex_sig_vec = torch.zeros(4, 1152).to(device, dtype=DTYPE)
         ex_bert_emb = torch.zeros(4, 1, 1024).to(device, dtype=DTYPE)
@@ -186,15 +221,17 @@ if __name__ == "__main__":
         bert_vec = torch.zeros(bs, 1024).to(device, dtype=DTYPE)
 
         # img_mask = random_mask(bs, latents.shape[-2], latents.shape[-1], patch_size, mask_ratio=MASK_RATIO).to(device, dtype=DTYPE)
-        cfg_mask = random_mask(bs, 1, 1, (1, 1), CFG_RATIO).to(device, dtype=DTYPE).view(bs)
+        cfg_mask = random_cfg_mask(bs, 0.1).to(device, dtype=DTYPE)
 
-        siglip_emb = batch["siglip_emb"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
-        siglip_vec = batch["siglip_vec"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
+        siglip_emb, siglip_vec = encode_siglip(batch["caption"])
+
+        siglip_emb = siglip_emb.to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
+        siglip_vec = siglip_vec.to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
         # bert_emb = batch["bert_emb"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
         # bert_vec = batch["bert_vec"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
 
         # txt_mask = random_mask(bs, siglip_emb.size(1), 1, (1, 1), mask_ratio=0).to(device=device, dtype=DTYPE)
-        # txt_mask = random_mask(bs, siglip_emb.size(1), 1, (1, 1), mask_ratio=MASK_RATIO).to(device=device, dtype=DTYPE)
+        txt_mask = random_mask(bs, siglip_emb.size(1), 1, (1, 1), mask_ratio=MASK_RATIO).to(device=device, dtype=DTYPE)
         # txt_mask = random_mask(bs, siglip_emb.size(1)+bert_emb.size(1), 1, (1, 1), mask_ratio=MASK_RATIO).to(device=device, dtype=DTYPE)
 
         nt = torch.randn((bs,), device=device, dtype=DTYPE)
@@ -204,7 +241,7 @@ if __name__ == "__main__":
         z = torch.randn_like(latents, device=device, dtype=DTYPE)
         x_t = (1 - texp) * latents + texp * z
 
-        vtheta = model(x_t, t, siglip_emb, siglip_vec, bert_emb, bert_vec, None, None)
+        vtheta = model(x_t, t, siglip_emb, siglip_vec, bert_emb, bert_vec, None, txt_mask)
 
         # vtheta = apply_mask_to_tensor(vtheta, img_mask, patch_size)
         # latents = apply_mask_to_tensor(latents, img_mask, patch_size)
@@ -212,13 +249,9 @@ if __name__ == "__main__":
 
         v = z - latents
 
-        # weights = torch.clamp(1.0-texp, max=0.8)
-        # weights = torch.sqrt(1.0 - texp)
-
-        mse = (((v - vtheta) ** 2))
-        # mse = (mse  * weights)
+        mse = (((v - vtheta) ** 2)).mean()
         # loss = mse.mean() * (1 / (1 - MASK_RATIO))
-        loss = mse.mean()
+        loss = mse
 
         optimizer.zero_grad()
         accelerator.backward(loss)

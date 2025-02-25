@@ -14,10 +14,10 @@ AE_SCALING_FACTOR = 0.41407 # f32-c32-sana-1.1
 BS = 256
 TRAIN_STEPS = 300_000
 MASK_RATIO = 0.75 # Percent to mask
-CFG_RATIO = 0.8 # Percent to not drop
+CFG_RATIO = 0.1 # Percent to drop
 MAX_CAPTION_LEN = 32 # Token length to encode
 
-LR = 0.00005
+LR = 0.00025
 
 # AE_HF_NAME = "madebyollin/sdxl-vae-fp16-fix"
 # AE_HF_NAME = "dc-ae-f32c32-in-1.0-diffusers"
