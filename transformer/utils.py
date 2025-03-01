@@ -68,6 +68,22 @@ def random_mask(bs: int, height: int, width: int, patch_size: tuple[int, int], m
 
     return mask
 
+def expand_mask(mask, h, w, patch_size):
+    """
+    Expands the mask from (bs, h//patch_size[0] * w//patch_size[1]) to (bs, h*w)
+    """
+    bs, num_tokens = mask.shape
+
+    num_patches_h = h // patch_size[0]
+    num_patches_w = w // patch_size[1]
+
+    mask = mask.view(bs, num_patches_h, num_patches_w)
+    mask = mask.unsqueeze(1)
+    mask = mask.repeat(1, 1, patch_size[0], patch_size[1])
+    mask = mask.view(bs, h*w)
+
+    return mask
+
 def remove_masked_tokens(tokens, mask):
     """
     Removes the masked tokens from the tokens tensor while preserving batch dimensions.
