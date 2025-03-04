@@ -41,8 +41,8 @@ def sample_images(model, vae, ds, noise, prompts, sig_emb, sig_vec):
         return (images - min_vals) / scale
 
     # Use the stored embeddings
-    sampled_latents = model.sample(noise, sig_emb, sig_vec, sample_steps=50, cfg=1.0).to(device, dtype=DTYPE)
-    cfg_sampled_latents = model.sample(noise, sig_emb, sig_vec, sample_steps=50, cfg=7.0).to(device, dtype=DTYPE)
+    sampled_latents = model.sample(noise, sig_emb, sig_vec, sample_steps=1, cfg=3.0).to(device, dtype=DTYPE)
+    cfg_sampled_latents = model.sample(noise, sig_emb, sig_vec, sample_steps=50, cfg=3.0).to(device, dtype=DTYPE)
     
     # Decode latents to images
     sampled_images = normalize_batch(vae.decode(sampled_latents).sample)
@@ -65,7 +65,7 @@ if __name__ == "__main__":
     # torch.set_float32_matmul_precision('high')
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    embed_dim = 384 * 2
+    embed_dim = 768
     patch_size = (2,2)
 
     params = ReiMeiParameters(
@@ -101,14 +101,13 @@ if __name__ == "__main__":
         channels=AE_CHANNELS,
         patch_size=patch_size,
         embed_dim=embed_dim,
-        num_layers=6,
+        num_layers=4,
         num_heads=(embed_dim // 128),
         siglip_dim=SIGLIP_EMBED_DIM,
         num_experts=4,
         capacity_factor=1.0,
         shared_experts=1,
         dropout=0.1,
-        token_mixer_layers=1,
         image_text_expert_ratio=4,
         use_moe=False,
     )
@@ -117,18 +116,18 @@ if __name__ == "__main__":
     params_count = sum(p.numel() for p in discriminator.parameters())
     print("Number of discriminator parameters: ", params_count)
 
-    wandb.init(project="ReiMei", config={
-        "params_count": params_count,
-        "dataset_name": DATASET_NAME,
-        "ae_hf_name": AE_HF_NAME,
-        "lr": LR,
-        "bs": BS,
-        "CFG_RATIO": CFG_RATIO,
-        "MASK_RATIO": MASK_RATIO,
-        "MAX_CAPTION_LEN": MAX_CAPTION_LEN,
-        "params": params,
-        "discriminator_params": discriminator_params,
-    })
+    # wandb.init(project="ReiMei", config={
+    #     "params_count": params_count,
+    #     "dataset_name": DATASET_NAME,
+    #     "ae_hf_name": AE_HF_NAME,
+    #     "lr": LR,
+    #     "bs": BS,
+    #     "CFG_RATIO": CFG_RATIO,
+    #     "MASK_RATIO": MASK_RATIO,
+    #     "MAX_CAPTION_LEN": MAX_CAPTION_LEN,
+    #     "params": params,
+    #     "discriminator_params": discriminator_params,
+    # })
     
     ds = get_dataset(BS, SEED + accelerator.process_index, device=device, dtype=DTYPE, num_workers=1)
 
@@ -242,7 +241,8 @@ if __name__ == "__main__":
         v = z_h - latents_h
 
         mse = (((v - vtheta_h) ** 2)).mean()
-        loss = mse + g_loss
+        # loss = ((mse * (1-texp)).mean() + (g_loss * texp).mean())
+        loss = mse + g_loss.mean()
 
         optimizer.zero_grad()
         accelerator.backward(loss)
@@ -251,8 +251,8 @@ if __name__ == "__main__":
 
         progress_bar.set_postfix(loss=loss.item())
         
-        if accelerator.is_main_process:
-            wandb.log({"loss": loss.item()}, step=batch_idx)
+        # if accelerator.is_main_process:
+        #     wandb.log({"loss": loss.item()}, step=batch_idx)
 
         del mse, loss, v, vtheta_h, latents_h, z_h
 

@@ -263,7 +263,8 @@ def gan_loss_with_approximate_penalties(
 
     # Generate fake images
     fake_v = generator(x_t, t, siglip_emb, siglip_vec, img_mask, txt_mask)
-    fake_images = x_t - (fake_v * t)
+    texp = t.view(-1, 1, 1, 1)
+    fake_images = x_t - (fake_v * texp)
 
     # Evaluate discriminator
     disc_real = discriminator(latents, siglip_emb, siglip_vec, img_mask, txt_mask)
@@ -275,5 +276,5 @@ def gan_loss_with_approximate_penalties(
         loss += approximate_r1_loss(discriminator, latents, siglip_emb, siglip_vec, img_mask, txt_mask)
         loss += approximate_r2_loss(discriminator, fake_images, siglip_emb, siglip_vec, img_mask, txt_mask)
     else:
-        loss = f(disc_real - disc_fake).mean()
+        loss = f(disc_real - disc_fake)
     return loss, fake_v
