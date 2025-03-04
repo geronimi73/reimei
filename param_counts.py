@@ -13,7 +13,6 @@ params = ReiMeiParameters(
     num_layers=4,
     num_heads=(768 // 64),
     siglip_dim=1152,
-    bert_dim=1024,
     num_experts=4,
     capacity_factor=2.0,
     shared_experts=2,

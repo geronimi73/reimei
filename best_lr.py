@@ -9,8 +9,6 @@ import os
 
 # From your code/config
 from config import (
-    BERT_EMBED_DIM,
-    BERT_HF_NAME,
     MODELS_DIR_BASE,
     SIGLIP_EMBED_DIM,
     BS,
@@ -27,7 +25,7 @@ from datasets import load_dataset
 from dataset.shapebatching_dataset import ShapeBatchingDataset
 from transformer.reimei import ReiMei, ReiMeiParameters
 from transformer.utils import random_mask, apply_mask_to_tensor
-from transformers import SiglipTokenizer, SiglipTextModel, AutoTokenizer, ModernBertModel
+from transformers import SiglipTokenizer, SiglipTextModel
 
 DTYPE = torch.bfloat16
 
@@ -36,10 +34,8 @@ def get_dataset(bs, seed, device, num_workers=16):
     ds = ds.to_iterable_dataset(1000)
     siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device)
     siglip_tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
-    bert_model = ModernBertModel.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert").to(device)
-    bert_tokenizer = AutoTokenizer.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert")
     
-    ds = ShapeBatchingDataset(ds, bs, siglip_tokenizer, siglip_model, bert_tokenizer, bert_model, device, num_workers, shuffle=True, seed=seed)
+    ds = ShapeBatchingDataset(ds, bs, siglip_tokenizer, siglip_model, device, num_workers, shuffle=True, seed=seed)
     return ds
 
 def lr_range_test(
@@ -95,8 +91,6 @@ def lr_range_test(
         latents = batch["ae_latent"].to(device, dtype=DTYPE)
         siglip_emb = batch["siglip_emb"].to(device, dtype=DTYPE)
         siglip_vec = batch["siglip_vec"].to(device, dtype=DTYPE)
-        bert_emb = batch["bert_emb"].to(device, dtype=DTYPE)
-        bert_vec = batch["bert_vec"].to(device, dtype=DTYPE)
 
         bs, c, h, w = latents.shape
 
@@ -119,7 +113,6 @@ def lr_range_test(
         vtheta = test_model(
             x_t, t, 
             siglip_emb, siglip_vec, 
-            bert_emb, bert_vec, 
             mask
         )
 
@@ -203,7 +196,6 @@ if __name__ == "__main__":
             num_heads=num_heads,
             mlp_dim=mlp_dim,
             siglip_dim=SIGLIP_EMBED_DIM,
-            bert_dim=BERT_EMBED_DIM,
             num_experts=nx,
             capacity_factor=2.0,  # match your defaults
             shared_experts=1,

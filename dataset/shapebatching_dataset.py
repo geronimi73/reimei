@@ -3,7 +3,7 @@ from torch.utils.data import IterableDataset
 from collections import defaultdict
 import numpy as np
 from torch.utils.data import DataLoader
-from config import DATASET_NAME, DS_DIR_BASE, MAX_CAPTION_LEN, MODELS_DIR_BASE, SIGLIP_EMBED_DIM, BERT_EMBED_DIM, SIGLIP_HF_NAME, USERNAME
+from config import DATASET_NAME, DS_DIR_BASE, MAX_CAPTION_LEN, MODELS_DIR_BASE, SIGLIP_EMBED_DIM, SIGLIP_HF_NAME, USERNAME
 import random
 from transformers import SiglipTextModel, SiglipTokenizer
 from datasets import load_dataset
@@ -50,7 +50,7 @@ def custom_collate(batch):
 
 
 class ShapeBatchingDataset(IterableDataset):
-    def __init__(self, hf_dataset, batch_size, siglip_tokenizer, siglip_model, bert_tokenizer, bert_model, device, num_workers, shuffle=True, seed=42, buffer_multiplier=20, ):
+    def __init__(self, hf_dataset, batch_size, siglip_tokenizer, siglip_model, device, num_workers, shuffle=True, seed=42, buffer_multiplier=20, ):
     # def __init__(self, hf_dataset, batch_size, device, num_workers, shuffle=True, seed=42, buffer_multiplier=20, ):
         self.dataset = hf_dataset
         self.batch_size = batch_size
@@ -59,8 +59,6 @@ class ShapeBatchingDataset(IterableDataset):
         self.buffer_multiplier = buffer_multiplier
         self.siglip_tokenizer = siglip_tokenizer
         self.siglip_model = siglip_model
-        self.bert_tokenizer = bert_tokenizer
-        self.bert_model = bert_model
         self.device = device
         self.num_workers = num_workers
 
@@ -96,12 +94,7 @@ class ShapeBatchingDataset(IterableDataset):
         # ae_latent = torch.stack([s['ae_latent'].reshape(*ae_latent_shape) for s in samples])
         ae_latent = torch.stack(samples["ae_latent"]).squeeze(1)
 
-        # if bool(random.getrandbits(1)):
         siglip_embedding, siglip_vec = self.encode_siglip(samples["caption"])
-        # else:
-        # _, _, bert_embedding, bert_vec = self.encode_bert(samples["caption"])
-
-        # siglip_embedding, siglip_vec, bert_embedding, bert_vec = self.encode(samples["caption"])
 
         batch = {
             'caption': samples["caption"],
@@ -112,25 +105,7 @@ class ShapeBatchingDataset(IterableDataset):
         }
         return batch
 
-    # Encodes a batch of strings into a batch of embeddings
-    @torch.no_grad
-    def encode(self, captions):
-        # Encode the captions
-        s_tokens = self.siglip_tokenizer(captions, padding='longest', truncation=True, return_tensors="pt", max_length=MAX_CAPTION_LEN).to(self.device)
-        b_tokens = self.bert_tokenizer(["[CLS]"+ c for c in captions], padding='longest', truncation=True, return_tensors="pt", max_length=MAX_CAPTION_LEN + 1).to(self.device)
-
-        # Get the embeddings
-        siglip_outputs = self.siglip_model(**s_tokens, output_hidden_states=True)
-        siglip_embedding = siglip_outputs.hidden_states[-1]
-        siglip_vec = siglip_outputs.pooler_output
-
-        bert_outputs = self.bert_model(**b_tokens, output_hidden_states=True).hidden_states[-1] # (bs, 65, 768). The 65 is CLS + 64 tokens. So we need to seperate the CLS token from the rest.
-        bert_vec = bert_outputs[:, 0, :] # (bs, 1024)
-        bert_embedding = bert_outputs[:, 1:, :] # (bs, 64, 1024)
-
-        return siglip_embedding, siglip_vec, bert_embedding, bert_vec
-    
-    # Encodes with only siglip, 0s for bert
+    # Encodes with siglip
     @torch.no_grad
     def encode_siglip(self, captions):
         bs = len(captions)
@@ -143,28 +118,13 @@ class ShapeBatchingDataset(IterableDataset):
 
         return siglip_embedding, siglip_vec
     
-    @torch.no_grad
-    def encode_bert(self, captions):
-        bs = len(captions)
-
-        # Encode the captions
-        b_tokens = self.bert_tokenizer(["[CLS]"+ c for c in captions], padding='longest', truncation=True, return_tensors="pt", max_length=MAX_CAPTION_LEN + 1).to(self.device)
-
-        bert_outputs = self.bert_model(**b_tokens, output_hidden_states=True).hidden_states[-1] # (bs, 65, 768). The 65 is CLS + 64 tokens. So we need to seperate the CLS token from the rest.
-        bert_vec = bert_outputs[:, 0, :] # (bs, 1024)
-        bert_embedding = bert_outputs[:, 1:, :] # (bs, 64, 1024)
-
-        return bert_embedding, bert_vec
-    
 def get_dataset(bs, seed, device, dtype, num_workers=16):
     # ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", split="train", streaming=True)
     ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=num_workers, split="train")
     ds = ds.to_iterable_dataset(1000)
     siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device, dtype)
     siglip_tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
-    # bert_model = ModernBertModel.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert").to(device, DTYPE)
-    # bert_tokenizer = AutoTokenizer.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert")
-    
+
     # ds = ShapeBatchingDataset(ds, bs, device, num_workers, shuffle=True, seed=seed)
-    ds = ShapeBatchingDataset(ds, bs, siglip_tokenizer, siglip_model, None, None, device, num_workers, shuffle=True, seed=seed)
+    ds = ShapeBatchingDataset(ds, bs, siglip_tokenizer, siglip_model, device, num_workers, shuffle=True, seed=seed)
     return ds

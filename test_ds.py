@@ -1,6 +1,6 @@
 from datasets import load_dataset, Features, Value, Sequence
-from config import DS_DIR_BASE, DATASET_NAME, USERNAME, BERT_HF_NAME, SIGLIP_HF_NAME, MODELS_DIR_BASE, AE_SCALING_FACTOR
-from transformers import SiglipTokenizer, SiglipTextModel, AutoTokenizer, ModernBertModel
+from config import DS_DIR_BASE, DATASET_NAME, USERNAME, SIGLIP_HF_NAME, MODELS_DIR_BASE, AE_SCALING_FACTOR
+from transformers import SiglipTokenizer, SiglipTextModel
 import time
 import datasets
 import torch
@@ -16,10 +16,9 @@ if __name__ == "__main__":
 
     siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device)
     siglip_tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
-    bert_model = ModernBertModel.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert").to(device)
-    bert_tokenizer = AutoTokenizer.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert")
 
-    ds = ShapeBatchingDataset(ds, 16, siglip_tokenizer, siglip_model, bert_tokenizer, bert_model, device, 1)
+
+    ds = ShapeBatchingDataset(ds, 16, siglip_tokenizer, siglip_model, device, 1)
 
     t = time.time()
     for row in ds:

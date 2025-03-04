@@ -3,11 +3,12 @@ import json
 import random
 import torch
 from dataset.shapebatching_dataset import ShapeBatchingDataset, get_dataset
-from dataset.inet96 import ImageNet96Dataset
-from dataset.inet8bit import ImageNetDataset, InfiniteDataLoader
+# from dataset.inet96 import ImageNet96Dataset
+# from dataset.inet8bit import ImageNetDataset, InfiniteDataLoader
 from transformer.reimei import ReiMei, ReiMeiParameters
+from transformer.discriminator import Discriminator, DiscriminatorParameters, gan_loss_with_approximate_penalties
 from accelerate import Accelerator
-from config import AE_SHIFT_FACTOR, BERT_EMBED_DIM, BERT_HF_NAME, BS, CFG_RATIO, MAX_CAPTION_LEN, TRAIN_STEPS, MASK_RATIO, AE_SCALING_FACTOR, AE_CHANNELS, AE_HF_NAME, MODELS_DIR_BASE, DS_DIR_BASE, SEED, SIGLIP_EMBED_DIM, SIGLIP_HF_NAME, USERNAME, DATASET_NAME, LR
+from config import AE_SHIFT_FACTOR, BS, CFG_RATIO, MAX_CAPTION_LEN, TRAIN_STEPS, MASK_RATIO, AE_SCALING_FACTOR, AE_CHANNELS, AE_HF_NAME, MODELS_DIR_BASE, DS_DIR_BASE, SEED, SIGLIP_EMBED_DIM, SIGLIP_HF_NAME, USERNAME, DATASET_NAME, LR
 from config import DIT_S as DIT
 from datasets import load_dataset
 from transformer.utils import expand_mask, random_cfg_mask, random_mask, apply_mask_to_tensor, remove_masked_tokens
@@ -23,13 +24,13 @@ from diffusers import AutoencoderDC
 from diffusers import AutoencoderKL
 from torch.optim.lr_scheduler import OneCycleLR
 import wandb
-from torchmetrics.functional.multimodal import clip_score
+# from torchmetrics.functional.multimodal import clip_score
 from transformers import SiglipModel, SiglipProcessor
 
 DTYPE = torch.bfloat16
 
 @torch.no_grad
-def sample_images(model, vae, ds, noise, prompts, sig_emb, sig_vec, bert_emb, bert_vec):
+def sample_images(model, vae, ds, noise, prompts, sig_emb, sig_vec):
     def normalize_batch(images):
         min_vals = images.amin(dim=(1, 2, 3), keepdim=True)  # Min per image
         max_vals = images.amax(dim=(1, 2, 3), keepdim=True)  # Max per image
@@ -40,8 +41,8 @@ def sample_images(model, vae, ds, noise, prompts, sig_emb, sig_vec, bert_emb, be
         return (images - min_vals) / scale
 
     # Use the stored embeddings
-    sampled_latents = model.sample(noise, sig_emb, sig_vec, bert_emb, bert_vec, sample_steps=50, cfg=1.0).to(device, dtype=DTYPE)
-    cfg_sampled_latents = model.sample(noise, sig_emb, sig_vec, bert_emb, bert_vec, sample_steps=50, cfg=7.0).to(device, dtype=DTYPE)
+    sampled_latents = model.sample(noise, sig_emb, sig_vec, sample_steps=50, cfg=1.0).to(device, dtype=DTYPE)
+    cfg_sampled_latents = model.sample(noise, sig_emb, sig_vec, sample_steps=50, cfg=7.0).to(device, dtype=DTYPE)
     
     # Decode latents to images
     sampled_images = normalize_batch(vae.decode(sampled_latents).sample)
@@ -76,7 +77,6 @@ if __name__ == "__main__":
         num_layers=6,
         num_heads=(embed_dim // 128),
         siglip_dim=SIGLIP_EMBED_DIM,
-        bert_dim=BERT_EMBED_DIM,
         num_experts=4,
         capacity_factor=1.0,
         shared_experts=1,
@@ -95,6 +95,28 @@ if __name__ == "__main__":
     params_count = sum(p.numel() for p in model.parameters())
     print("Number of parameters: ", params_count)
 
+    discriminator_params = DiscriminatorParameters(
+        use_mmdit=True,
+        use_ec=True,
+        channels=AE_CHANNELS,
+        patch_size=patch_size,
+        embed_dim=embed_dim,
+        num_layers=6,
+        num_heads=(embed_dim // 128),
+        siglip_dim=SIGLIP_EMBED_DIM,
+        num_experts=4,
+        capacity_factor=1.0,
+        shared_experts=1,
+        dropout=0.1,
+        token_mixer_layers=1,
+        image_text_expert_ratio=4,
+        use_moe=False,
+    )
+
+    discriminator = Discriminator(discriminator_params)
+    params_count = sum(p.numel() for p in discriminator.parameters())
+    print("Number of discriminator parameters: ", params_count)
+
     wandb.init(project="ReiMei", config={
         "params_count": params_count,
         "dataset_name": DATASET_NAME,
@@ -105,57 +127,18 @@ if __name__ == "__main__":
         "MASK_RATIO": MASK_RATIO,
         "MAX_CAPTION_LEN": MAX_CAPTION_LEN,
         "params": params,
+        "discriminator_params": discriminator_params,
     })
     
     ds = get_dataset(BS, SEED + accelerator.process_index, device=device, dtype=DTYPE, num_workers=1)
-    # ds = MemmapDataset(f"{DS_DIR_BASE}/celeb-a-hq-dc-ae-256/latents.pth")
-    # ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=16, split="train").to_iterable_dataset(1000)
-    # ds = ImageNetDataset(f"{DS_DIR_BASE}/imagenet.int8/inet.npy", f"{DS_DIR_BASE}/imagenet.int8/inet.json")
-    # dataset = DataLoader(ds, batch_size=BS, shuffle=True, num_workers=1)
-    # dataset = InfiniteDataLoader(ds, device, DTYPE)
-
-    # ds = load_dataset(f"{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=1, split="train").to_iterable_dataset(50)
-
-    # siglip_model = SiglipModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device, DTYPE)
-    # siglip_processor = SiglipProcessor.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
-
-    # @torch.no_grad
-    # def encode_siglip(captions):
-    #     # Encode the captions
-    #     s_tokens = siglip_processor.tokenizer(captions, padding='longest', truncation=True, return_tensors="pt", max_length=MAX_CAPTION_LEN).to(device)
-    #     siglip_outputs = siglip_model.text_model(**s_tokens, output_hidden_states=True)
-    #     siglip_embedding = siglip_outputs.hidden_states[-1]
-    #     siglip_vec = siglip_outputs.pooler_output
-
-    #     return siglip_embedding, siglip_vec
-    
-    # @torch.no_grad
-    # def calculate_score(images, captions):
-    #     # Tokenize captions
-    #     text_inputs = siglip_processor.tokenizer(
-    #         captions, padding='longest', truncation=True, return_tensors="pt", max_length=MAX_CAPTION_LEN
-    #     ).to(device)
-        
-    #     # Encode text
-    #     text_embeddings = siglip_model.get_text_features(**text_inputs, output_hidden_states=True)
-        
-    #     # Encode images
-    #     image_inputs = siglip_processor(images=images.to(torch.float32), return_tensors="pt").to(device)
-    #     image_outputs = siglip_model.get_image_features(**image_inputs)  # [B, D]
-        
-    #     # Compute cosine similarity
-    #     scores = torch.nn.functional.cosine_similarity(image_outputs, text_embeddings, dim=-1)
-    #     return scores
-
-    # ds = ImageNet96Dataset(ds, BS, device, DTYPE)
-
 
     optimizer = torch.optim.AdamW(model.parameters(), betas=(0.9, 0.95), lr=LR, weight_decay=0.01)
+    discriminator_optimizer = torch.optim.AdamW(discriminator.parameters(), betas=(0.9, 0.95), lr=LR, weight_decay=0.01)
 
     # scheduler = OneCycleLR(optimizer, max_lr=LR, total_steps=TRAIN_STEPS)
 
     # model, optimizer, scheduler, train_dataloader = accelerator.prepare(model, optimizer, scheduler, dataset)
-    model, optimizer, ds = accelerator.prepare(model, optimizer, ds)
+    model, optimizer, discriminator, discriminator_optimizer, ds = accelerator.prepare(model, optimizer, discriminator, discriminator_optimizer, ds)
 
     # checkpoint = torch.load(f"models/pretrained_reimei_model_and_optimizer.pt")
     # checkpoint = torch.load(f"models/reimei_model_and_optimizer_3_f32.pt")
@@ -201,11 +184,6 @@ if __name__ == "__main__":
         ex_captions = ["a cheeseburger on a white plate", "a bunch of bananas on a wooden table", "a white tea pot on a wooden table", "an erupting volcano with lava pouring out"]
         ex_sig_emb, ex_sig_vec = ds.encode_siglip(ex_captions)
 
-        # ex_sig_emb = torch.zeros(4, 1, 1152).to(device, dtype=DTYPE)
-        # ex_sig_vec = torch.zeros(4, 1152).to(device, dtype=DTYPE)
-        ex_bert_emb = torch.zeros(4, 1, 1024).to(device, dtype=DTYPE)
-        ex_bert_vec = torch.zeros(4, 1024).to(device, dtype=DTYPE)
-
         ae = ae.to("cpu")
 
     print("Starting training...")
@@ -222,27 +200,14 @@ if __name__ == "__main__":
 
         siglip_emb = batch["siglip_emb"].to(device, dtype=DTYPE)
         siglip_vec = batch["siglip_vec"].to(device, dtype=DTYPE)
-        # bert_emb = batch["bert_emb"].to(device, dtype=DTYPE)
-        # bert_vec = batch["bert_vec"].to(device, dtype=DTYPE)
-        
-        # siglip_emb = torch.zeros(bs, 1, 1152).to(device, dtype=DTYPE)
-        # siglip_vec = torch.zeros(bs, 1152).to(device, dtype=DTYPE)
-        bert_emb = torch.zeros(bs, 1, 1024).to(device, dtype=DTYPE)
-        bert_vec = torch.zeros(bs, 1024).to(device, dtype=DTYPE)
 
         img_mask = random_mask(bs, latents.shape[-2], latents.shape[-1], patch_size, mask_ratio=MASK_RATIO).to(device, dtype=DTYPE)
         cfg_mask = random_cfg_mask(bs, 0.1).to(device, dtype=DTYPE)
 
-        # siglip_emb, siglip_vec = encode_siglip(batch["caption"])
-
         siglip_emb = siglip_emb.to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
         siglip_vec = siglip_vec.to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
-        # bert_emb = batch["bert_emb"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
-        # bert_vec = batch["bert_vec"].to(device, dtype=DTYPE) * cfg_mask.view(bs, 1)
 
-        # txt_mask = random_mask(bs, siglip_emb.size(1), 1, (1, 1), mask_ratio=0).to(device=device, dtype=DTYPE)
         txt_mask = random_mask(bs, siglip_emb.size(1), 1, (1, 1), mask_ratio=MASK_RATIO).to(device=device, dtype=DTYPE)
-        # txt_mask = random_mask(bs, siglip_emb.size(1)+bert_emb.size(1), 1, (1, 1), mask_ratio=MASK_RATIO).to(device=device, dtype=DTYPE)
 
         nt = torch.randn((bs,), device=device, dtype=DTYPE)
         t = torch.sigmoid(nt)
@@ -251,7 +216,17 @@ if __name__ == "__main__":
         z = torch.randn_like(latents, device=device, dtype=DTYPE)
         x_t = (1 - texp) * latents + texp * z
 
-        vtheta = model(x_t, t, siglip_emb, siglip_vec, bert_emb, bert_vec, img_mask, txt_mask)
+        # Discriminator
+        d_loss, _ = gan_loss_with_approximate_penalties(discriminator, model, latents, x_t, t, siglip_emb, siglip_vec, img_mask, txt_mask, discriminator_turn=True)
+
+        discriminator_optimizer.zero_grad()
+        accelerator.backward(d_loss)
+        discriminator_optimizer.step()
+
+        # Generator
+        g_loss, vtheta = gan_loss_with_approximate_penalties(discriminator, model, latents, x_t, t, siglip_emb, siglip_vec, img_mask, txt_mask, discriminator_turn=False)
+
+        # vtheta = model(x_t, t, siglip_emb, siglip_vec, img_mask, txt_mask)
 
         img_mask = expand_mask(img_mask, latents.shape[-2], latents.shape[-1], patch_size)
 
@@ -267,7 +242,7 @@ if __name__ == "__main__":
         v = z_h - latents_h
 
         mse = (((v - vtheta_h) ** 2)).mean()
-        loss = mse
+        loss = mse + g_loss
 
         optimizer.zero_grad()
         accelerator.backward(loss)
@@ -288,7 +263,7 @@ if __name__ == "__main__":
                     model.eval()
                     ae = ae.to(device)
 
-                    grid = sample_images(model, ae, ds, noise, ex_captions, ex_sig_emb, ex_sig_vec, ex_bert_emb, ex_bert_vec)
+                    grid = sample_images(model, ae, ds, noise, ex_captions, ex_sig_emb, ex_sig_vec)
                     torchvision.utils.save_image(grid, f"logs/sampled_images_step_{batch_idx}.png")
 
                     # wandb.log({"Siglip scores": scores.mean().item(), "Siglip scores with CFG": cfg_scores.mean().item()}, step=batch_idx)

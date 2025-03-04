@@ -7,7 +7,7 @@
 
 Training and inference code for reimei, a diffusion model for image generation.
 
-Utilizing deferred masking, the Deep Compression AutoEncoder (DC-AE), Moe-MMDiT blocks from SD3/Flux, Siglip and ModernBERT text encoders
+Utilizing deferred masking, the Deep Compression AutoEncoder (DC-AE), Moe-MMDiT blocks from SD3/Flux, Siglip text encoder
 
 
 To run training

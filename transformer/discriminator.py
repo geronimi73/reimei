@@ -1,18 +1,14 @@
 import math
 import torch.nn as nn
-from torch.nn.modules.normalization import RMSNorm
 from transformer.math import rope_ids
-from transformer.moe import MoeMLP
-from .embed import EmbedND, PatchEmbed, rope_1d, rope_2d, sincos_1d, sincos_2d, TimestepEmbedder, MLPEmbedder, OutputLayer
-from .utils import remove_masked_tokens, add_masked_tokens, unpatchify
+from .embed import EmbedND, PatchEmbed, TimestepEmbedder, MLPEmbedder, OutputLayer
+from .utils import remove_masked_tokens
 from .backbone import BackboneParams, TransformerBackbone
-from .token_mixer import TokenMixer, TokenMixerParameters
 import torch
-from config import AE_SCALING_FACTOR, AE_SHIFT_FACTOR
 from dataclasses import dataclass
 
 @dataclass
-class ReiMeiParameters:
+class DiscriminatorParameters:
     use_mmdit: bool = True
     use_ec: bool = False
     use_moe: bool = False
@@ -26,13 +22,12 @@ class ReiMeiParameters:
     capacity_factor: float = 2.0
     shared_experts: int = 2
     dropout: float = 0.1
-    token_mixer_layers: int = 2
     image_text_expert_ratio: int = 4
     # m_d: float = 1.0
 
-class ReiMei(nn.Module):
+class Discriminator(nn.Module):
     """
-    ReiMei is a image diffusion transformer model.
+    A GAN setup's Discriminator
 
         Args:
         channels (int): Number of input channels in the image data.
@@ -47,7 +42,6 @@ class ReiMei(nn.Module):
         capacity_factor (float, optional): Average number of experts per token. Default is 2.0.
         shared_experts (int, optional): Number of shared experts in the transformer backbone. Default is 2.
         dropout (float, optional): Dropout rate. Default is 0.1.
-        patch_mixer_layers (int, optional): Number of layers in the patch mixer. Default is 2.
 
     Attributes:
         embed_dim (int): Dimension of the embedding space.
@@ -56,11 +50,10 @@ class ReiMei(nn.Module):
         image_embedder (MLPEmbedder): Image embedding layer.
         text_embedder (MLPEmbedder): Text embedding layer.
         vector_embedder (MLPEmbedder): Vector embedding layer.
-        token_mixer (TokenMixer): Token mixer layer.
         backbone (TransformerBackbone): Transformer backbone model.
         output (MLPEmbedder): Output layer.
     """
-    def __init__(self, params: ReiMeiParameters):
+    def __init__(self, params: DiscriminatorParameters):
         super().__init__()
         self.params = params
         self.embed_dim = params.embed_dim
@@ -68,39 +61,17 @@ class ReiMei(nn.Module):
         self.channels = params.channels
         self.patch_size = params.patch_size
         self.use_mmdit = params.use_mmdit
-        
-        # Timestep embedding
-        self.time_embedder = TimestepEmbedder(self.embed_dim)
-
+            
         # Image embedding
         self.image_embedder = PatchEmbed(self.channels, self.embed_dim, self.patch_size)
         
         # Text embedding
         self.siglip_embedder = MLPEmbedder(params.siglip_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=1)
-
+    
         # Vector (y) embedding
         self.vector_embedder = MLPEmbedder(params.siglip_dim, self.embed_dim, hidden_dim=self.embed_dim*4, num_layers=2)
 
         self.rope_embedder = EmbedND(dim=self.head_dim)
-
-        # TokenMixer
-        if params.token_mixer_layers > 0:
-            self.use_token_mixer = True
-            token_mixer_params = TokenMixerParameters(
-                use_mmdit=params.use_mmdit,
-                use_ec=params.use_ec,
-                use_moe=params.use_moe,
-                embed_dim=self.embed_dim,
-                num_heads=params.num_heads,
-                num_layers=params.token_mixer_layers,
-                num_experts=params.num_experts,
-                capacity_factor=params.capacity_factor,
-                num_shared_experts=params.shared_experts,
-                exp_ratio=params.image_text_expert_ratio,
-            )
-            self.token_mixer = TokenMixer(token_mixer_params)
-        else:
-            self.use_token_mixer = False
 
         # Backbone transformer model
         backbone_params = BackboneParams(
@@ -118,7 +89,7 @@ class ReiMei(nn.Module):
         )
         self.backbone = TransformerBackbone(backbone_params)
         
-        self.output_layer = OutputLayer(self.embed_dim, self.channels * self.patch_size[0] * self.patch_size[1])
+        self.output_layer = OutputLayer(self.embed_dim, 1)
 
         self.initialize_weights()
 
@@ -163,35 +134,27 @@ class ReiMei(nn.Module):
         nn.init.constant_(self.output_layer.mlp.mlp[-1].weight, 0)
         nn.init.constant_(self.output_layer.mlp.mlp[-1].bias, 0)
 
-    def forward(self, img, time, sig_txt, sig_vec, img_mask=None, txt_mask=None):
+    def forward(self, img, txt, vec, img_mask=None, txt_mask=None):
         # img: (batch_size, channels, height, width)
-        # time: (batch_size, 1)
-        # sig_txt: (batch_size, seq_len, siglip_dim)
-        # sig_vec: (batch_size, siglip_dim)
+        # txt: (batch_size, seq_len, siglip_dim)
+        # vec: (batch_size, siglip_dim)
         # mask: (batch_size, num_tokens)
         batch_size, channels, height, width = img.shape
         ps_h, ps_w = self.patch_size
         patched_h, patched_w = height // ps_h, width // ps_w
 
         # Text embeddings
-        sig_txt = self.siglip_embedder(sig_txt)
-        txt = sig_txt
+        txt = self.siglip_embedder(txt)
 
         _, seq_len, _ = txt.shape
 
-        # Vector embedding (timestep + vector_embeddings)
-        time = self.time_embedder(time)
-        vec = self.vector_embedder(sig_vec) + time
+        vec = self.vector_embedder(vec)
 
         # Image embedding
         img = self.image_embedder(img)
 
         rope_id = rope_ids(batch_size, patched_h, patched_w, seq_len, img.device, img.dtype)
         rope_pe = self.rope_embedder(torch.cat(rope_id, dim=1))
-
-        # Token-mixer
-        if self.use_token_mixer:
-            img, txt = self.token_mixer(img, txt, vec, rope_pe)
 
         # Remove masked patches
         txt_rope_id, img_rope_id = rope_id
@@ -209,37 +172,108 @@ class ReiMei(nn.Module):
         img = self.backbone(img, txt, vec, rope_pe)
 
         # Final output layer
-        # (bs, unmasked_num_tokens, embed_dim) -> (bs, unmasked_num_tokens, in_channels)
+        # (bs, unmasked_num_tokens, embed_dim) -> (bs, unmasked_num_tokens, 1)
         img = self.output_layer(img, vec)
 
-        # Add masked patches
-        if img_mask is not None:
-            # (bs, unmasked_num_tokens, in_channels) -> (bs, num_tokens, in_channels)
-            img = add_masked_tokens(img, img_mask)
-
-        img = unpatchify(img, self.patch_size, height, width)
-        
-        return img
+        # (bs, unmasked_num_tokens, 1) -> (bs, 1)
+        logit = img.mean(dim=1)
+        return logit
     
-    @torch.no_grad()
-    def sample(self, z, sig_emb, sig_vec, sample_steps=50, cfg=3.0):
-        b = z.size(0)
-        dt = 1.0 / sample_steps
-        dt = torch.tensor([dt] * b).to(z.device, torch.bfloat16).view([b, *([1] * len(z.shape[1:]))])
-        images = [z]
 
-        for i in range(sample_steps, 0, -1):
-            t = i / sample_steps
-            t = torch.tensor([t] * b).to(z.device, torch.bfloat16)
+def approximate_r1_loss(
+    discriminator,
+    latents,
+    siglip_emb,
+    siglip_vec,
+    img_mask,
+    txt_mask,
+    sigma=0.01,
+    Lambda=100.0,
+):
+    """
+    Approx. R1 via finite differences:
+        L_{aR1} = || D(x) - D(x + noise) ||^2
+    """
+    noise = sigma * torch.randn_like(latents)
+    d_real = discriminator(latents, siglip_emb, siglip_vec, img_mask, txt_mask)
+    d_noisy = discriminator(latents + noise, siglip_emb, siglip_vec, img_mask, txt_mask)
+    return ((d_real - d_noisy).pow(2).mean()) * Lambda
 
-            vc = self(z, t, sig_emb, sig_vec, None, None).to(torch.bfloat16)
-            if cfg != 1.0:
-                null_sig_emb = torch.zeros(b, 1, self.params.siglip_dim).to(z.device, torch.bfloat16)
-                null_sig_vec = torch.zeros(b, self.params.siglip_dim).to(z.device, torch.bfloat16)
-                vu = self(z, t, null_sig_emb, null_sig_vec, None, None)
-                vc = vu + cfg * (vc - vu)
 
-            z = z - dt * vc
-            images.append(z)
+def approximate_r2_loss(
+    discriminator,
+    fake_images,
+    siglip_emb,
+    siglip_vec,
+    img_mask,
+    txt_mask,
+    sigma=0.01,
+    Lambda=100.0,
 
-        return (images[-1] / AE_SCALING_FACTOR) - AE_SHIFT_FACTOR
+):
+    """
+    Approx. R2 via finite differences:
+        L_{aR2} = || D(x_fake) - D(x_fake + noise) ||^2
+    """
+    noise = sigma * torch.randn_like(fake_images)
+    d_fake = discriminator(fake_images, siglip_emb, siglip_vec, img_mask, txt_mask)
+    d_fake_noisy = discriminator(fake_images + noise, siglip_emb, siglip_vec, img_mask, txt_mask)
+    return ((d_fake - d_fake_noisy).pow(2).mean()) * Lambda
+
+def gan_loss_with_approximate_penalties(
+    discriminator,
+    generator,
+    latents,
+    x_t,
+    t,
+    siglip_emb,
+    siglip_vec,
+    img_mask,
+    txt_mask,
+    discriminator_turn=True,
+    sigma=0.01,
+    Lambda=100.0
+):
+    """
+    Non saturating Relativistic GAN loss of the form:
+        E_{z,x}[ f(-(D(G(z)) - D(x))) ].
+    for the discriminator, and form:
+        E_{z,x}[ f(-(D(x) - D(G(z)))) ].
+    for the generator.
+
+    Adds approximate R1 and R2 penalties to the discriminator loss.
+
+    Args:
+        discriminator: Discriminator network D
+        generator: Generator network G
+        real_images: A batch of real data (x)
+        z: Noise tensor sampled from p_z
+        discriminator_turn: If True, calculates loss for the discriminator, else for the generator
+        f: Callable for f(D(fake) - D(real)) [defaults to torch.nn.functional.softplus]
+        generator_args: Extra positional args for G
+        generator_kwargs: Extra keyword args for G
+        disc_args: Extra positional args for D
+        disc_kwargs: Extra keyword args for D
+        sigma: Standard deviation of the noise added to the real images
+        Lambda: Weight for the approximate R1 and R2 penalties
+    """
+    # Default the function to logistic_f if none is provided
+
+    f = torch.nn.functional.softplus
+
+    # Generate fake images
+    fake_v = generator(x_t, t, siglip_emb, siglip_vec, img_mask, txt_mask)
+    fake_images = x_t - (fake_v * t)
+
+    # Evaluate discriminator
+    disc_real = discriminator(latents, siglip_emb, siglip_vec, img_mask, txt_mask)
+    disc_fake = discriminator(fake_images, siglip_emb, siglip_vec, img_mask, txt_mask)
+
+    # Compute the loss using default or provided f
+    if discriminator_turn:
+        loss = f(disc_fake - disc_real).mean()
+        loss += approximate_r1_loss(discriminator, latents, siglip_emb, siglip_vec, img_mask, txt_mask)
+        loss += approximate_r2_loss(discriminator, fake_images, siglip_emb, siglip_vec, img_mask, txt_mask)
+    else:
+        loss = f(disc_real - disc_fake).mean()
+    return loss, fake_v

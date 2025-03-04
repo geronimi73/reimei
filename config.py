@@ -36,8 +36,6 @@ else:
 
 SIGLIP_HF_NAME = "google/siglip-so400m-patch14-384"
 SIGLIP_EMBED_DIM = 1152
-BERT_HF_NAME = "answerdotai/ModernBERT-large"
-BERT_EMBED_DIM = 1024
 
 SEED = 42
 
