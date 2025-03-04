@@ -57,20 +57,25 @@ class DiTBlock(nn.Module):
     """
     def __init__(
         self, hidden_size, num_heads, mlp_dim,
-        num_experts=8, num_experts_per_tok=2, pretraining_tp=2, num_shared_experts=2, use_expert_choice=False, **block_kwargs
+        num_experts=8, num_experts_per_tok=2, pretraining_tp=2, num_shared_experts=2, use_moe: bool = False, use_expert_choice: bool = False, **block_kwargs
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        # mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        # approx_gelu = lambda: nn.GELU(approximate="tanh")
-        # self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0) 
-        if use_expert_choice:
-            self.moe = EC_SparseMoeBlock(hidden_size, mlp_dim, num_experts, float(num_experts_per_tok), pretraining_tp, num_shared_experts=num_shared_experts)
+
+        if use_moe:
+            if use_expert_choice:
+                self.mlp = EC_SparseMoeBlock(hidden_size, mlp_dim, num_experts, float(num_experts_per_tok), pretraining_tp, num_shared_experts=num_shared_experts)
+            else:
+                self.mlp = TC_SparseMoeBlock(hidden_size, mlp_dim, num_experts, int(num_experts_per_tok), pretraining_tp, num_shared_experts=num_shared_experts)
         else:
-            self.moe = TC_SparseMoeBlock(hidden_size, mlp_dim, num_experts, int(num_experts_per_tok), pretraining_tp, num_shared_experts=num_shared_experts)
+            self.mlp = nn.Sequential(
+                nn.Linear(hidden_size, mlp_dim, bias=True),
+                nn.GELU(approximate="tanh"),
+                nn.Linear(mlp_dim, hidden_size, bias=True),
+            )
 
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
@@ -80,7 +85,7 @@ class DiTBlock(nn.Module):
     def forward(self, x, c):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
         x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x).to(x.dtype), shift_msa, scale_msa))
-        x = x + gate_mlp.unsqueeze(1) * self.moe(modulate(self.norm2(x).to(x.dtype), shift_mlp, scale_mlp))
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x).to(x.dtype), shift_mlp, scale_mlp))
         return x
     
 class SelfAttention(nn.Module):
@@ -117,6 +122,7 @@ class DoubleStreamBlock(nn.Module):
         num_shared_experts=2,
         dropout: float = 0.1,
         exp_ratio: int = 4,
+        use_moe: bool = False,
         use_expert_choice: bool = False,
     ):
         super().__init__()
@@ -136,22 +142,34 @@ class DoubleStreamBlock(nn.Module):
         self.txt_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
 
         text_exps = max(1, num_experts // exp_ratio)
-        if use_expert_choice:
-            text_capacity = min(float(text_exps), float(capacity_factor))
+        if use_moe:
+            if use_expert_choice:
+                text_capacity = min(float(text_exps), float(capacity_factor))
 
-            self.img_moe = EC_SparseMoeBlock(
-                hidden_size, mlp_dim, num_experts, float(capacity_factor), pretraining_tp, num_shared_experts
-            )
-            self.txt_moe = EC_SparseMoeBlock(
-                hidden_size, mlp_dim, text_exps, text_capacity, pretraining_tp, num_shared_experts
-            )
+                self.img_mlp = EC_SparseMoeBlock(
+                    hidden_size, mlp_dim, num_experts, float(capacity_factor), pretraining_tp, num_shared_experts
+                )
+                self.txt_mlp = EC_SparseMoeBlock(
+                    hidden_size, mlp_dim, text_exps, text_capacity, pretraining_tp, num_shared_experts
+                )
+            else:
+                text_capacity = min(int(text_exps), int(capacity_factor))
+                self.img_mlp = TC_SparseMoeBlock(
+                    hidden_size, mlp_dim, num_experts, int(capacity_factor), pretraining_tp, num_shared_experts
+                )
+                self.txt_mlp = TC_SparseMoeBlock(
+                    hidden_size, mlp_dim, text_exps, text_capacity, pretraining_tp, num_shared_experts
+                )
         else:
-            text_capacity = min(int(text_exps), int(capacity_factor))
-            self.img_moe = TC_SparseMoeBlock(
-                hidden_size, mlp_dim, num_experts, int(capacity_factor), pretraining_tp, num_shared_experts
+            self.img_mlp = nn.Sequential(
+                nn.Linear(hidden_size, mlp_dim, bias=True),
+                nn.GELU(approximate="tanh"),
+                nn.Linear(mlp_dim, hidden_size, bias=True),
             )
-            self.txt_moe = TC_SparseMoeBlock(
-                hidden_size, mlp_dim, text_exps, text_capacity, pretraining_tp, num_shared_experts
+            self.txt_mlp = nn.Sequential(
+                nn.Linear(hidden_size, mlp_dim, bias=True),
+                nn.GELU(approximate="tanh"),
+                nn.Linear(mlp_dim, hidden_size, bias=True),
             )
 
     def forward(
@@ -190,11 +208,11 @@ class DoubleStreamBlock(nn.Module):
 
         # calculate the img bloks
         img = img + img_mod1.gate * self.img_attn.proj(img_attn)
-        img = img + img_mod2.gate * self.img_moe(((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift).to(dtype))
+        img = img + img_mod2.gate * self.img_mlp(((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift).to(dtype))
 
         # calculate the txt bloks
         txt = txt + txt_mod1.gate * self.txt_attn.proj(txt_attn)
-        txt = txt + txt_mod2.gate * self.txt_moe(((1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift).to(dtype))
+        txt = txt + txt_mod2.gate * self.txt_mlp(((1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift).to(dtype))
         
         return img, txt
     

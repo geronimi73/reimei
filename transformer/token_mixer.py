@@ -7,6 +7,7 @@ from transformer.dit import DoubleStreamBlock, DiTBlock
 class TokenMixerParameters:
     use_mmdit: bool = True
     use_ec: bool = False
+    use_moe: bool = False
     embed_dim: int = 1152
     num_heads: int = 1152 // 64
     num_layers: int = 2
@@ -44,6 +45,7 @@ class TokenMixer(nn.Module):
                     pretraining_tp=params.pretraining_tp,
                     num_shared_experts=params.num_shared_experts,
                     exp_ratio=params.exp_ratio,
+                    use_moe=params.use_moe,
                     use_expert_choice=params.use_ec,
                 )
                 for _ in range(params.num_layers)
@@ -58,6 +60,8 @@ class TokenMixer(nn.Module):
                     num_experts_per_tok=params.capacity_factor,
                     pretraining_tp=params.pretraining_tp,
                     num_shared_experts=params.num_shared_experts,
+                    use_moe=params.use_moe,
+                    use_expert_choice=params.use_ec,
                     attn_drop=0.1
                 )
                 for _ in range(params.num_layers)

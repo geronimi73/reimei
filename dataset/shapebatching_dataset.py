@@ -8,16 +8,16 @@ import random
 from transformers import SiglipTextModel, SiglipTokenizer
 from datasets import load_dataset
 
-def custom_collate(batch):
-    captions = [item['caption'] for item in batch]
-    ae_latents = [item['vae_latent'] for item in batch]
-    ae_latent_shapes = [item['vae_latent_shape'] for item in batch]
+# def custom_collate(batch):
+#     captions = [item['caption'] for item in batch]
+#     ae_latents = [item['ae_latent'] for item in batch]
+#     ae_latent_shapes = [item['ae_latent_shape'] for item in batch]
 
-    return {
-        'caption': captions,
-        'ae_latent': ae_latents,
-        'ae_latent_shape': ae_latent_shapes
-    }
+#     return {
+#         'caption': captions,
+#         'ae_latent': ae_latents,
+#         'ae_latent_shape': ae_latent_shapes
+#     }
 
 # def custom_collate(batch):
 #     from walloc.walloc import pil_to_latent
@@ -35,6 +35,18 @@ def custom_collate(batch):
 #         'ae_latent': ae_latents,
 #         'ae_latent_shape': ae_latent_shapes
 #     }
+
+def custom_collate(batch):
+    captions = [item['caption'] for item in batch]
+    
+    ae_latents = [torch.tensor(item['vae_latent'], dtype=torch.uint8).view(torch.float8_e5m2) for item in batch]
+    ae_latent_shapes = [item.shape for item in ae_latents]
+
+    return {
+        'caption': captions,
+        'ae_latent': ae_latents,
+        'ae_latent_shape': ae_latent_shapes
+    }
 
 
 class ShapeBatchingDataset(IterableDataset):
@@ -58,7 +70,6 @@ class ShapeBatchingDataset(IterableDataset):
                 self.dataset = self.dataset.shuffle(seed=self.seed, buffer_size=self.batch_size*self.buffer_multiplier)
             self.dataloader = DataLoader(self.dataset, self.batch_size * 2, prefetch_factor=5, num_workers=self.num_workers, collate_fn=custom_collate)
             
-            # shape_batches = defaultdict(lambda: {'caption': [], 'ae_latent': [], 'label': []})
             shape_batches = defaultdict(lambda: {'caption': [], 'ae_latent': []})
             for batch in self.dataloader:
                 caption = batch['caption']
@@ -70,7 +81,6 @@ class ShapeBatchingDataset(IterableDataset):
                     shape_key = tuple(ae_latent_shape[i])
                     shape_batches[shape_key]['caption'].append(caption[i])
                     shape_batches[shape_key]['ae_latent'].append(ae_latent[i])
-                    # shape_batches[shape_key]['label'].append(label[i])
 
                     # If enough samples are accumulated for this shape, yield a batch
                     if len(shape_batches[shape_key]['caption']) == self.batch_size:
@@ -78,18 +88,16 @@ class ShapeBatchingDataset(IterableDataset):
                         yield batch
                         shape_batches[shape_key]['caption'] = []
                         shape_batches[shape_key]['ae_latent'] = []
-                        # shape_batches[shape_key]['label'] = []
 
     def prepare_batch(self, samples, latent_shape):# -> dict[str, Any]:
         # Convert lists of samples into tensors
-        ae_latent = torch.tensor(np.stack([np.frombuffer(s, dtype=np.float32).copy() for s in samples["ae_latent"]])).reshape(-1, *latent_shape)
+        # ae_latent = torch.tensor(np.stack([np.frombuffer(s, dtype=np.float32).copy() for s in samples["ae_latent"]])).reshape(-1, *latent_shape)
         # ae_latent = torch.tensor(np.stack([np.array(s, dtype=np.float16).copy() for s in samples['ae_latent']])).reshape(-1, *latent_shape)
         # ae_latent = torch.stack([s['ae_latent'].reshape(*ae_latent_shape) for s in samples])
-        # ae_latent = torch.stack(samples["ae_latent"]).squeeze(1)
-
+        ae_latent = torch.stack(samples["ae_latent"]).squeeze(1)
 
         # if bool(random.getrandbits(1)):
-        siglip_embedding, siglip_vec, bert_embedding, bert_vec= self.encode_siglip(samples["caption"])
+        siglip_embedding, siglip_vec = self.encode_siglip(samples["caption"])
         # else:
         # _, _, bert_embedding, bert_vec = self.encode_bert(samples["caption"])
 
@@ -97,13 +105,10 @@ class ShapeBatchingDataset(IterableDataset):
 
         batch = {
             'caption': samples["caption"],
-            # 'label': torch.tensor(samples["label"], dtype=torch.int),
             'ae_latent': ae_latent,
             'ae_latent_shape': latent_shape,
             'siglip_emb': siglip_embedding,
             'siglip_vec': siglip_vec,
-            'bert_emb': bert_embedding,
-            'bert_vec': bert_vec,
         }
         return batch
 
@@ -136,10 +141,7 @@ class ShapeBatchingDataset(IterableDataset):
         siglip_embedding = siglip_outputs.hidden_states[-1]
         siglip_vec = siglip_outputs.pooler_output
 
-        bert_embedding = torch.zeros(bs, 1, BERT_EMBED_DIM).to(self.device, siglip_vec.dtype)
-        bert_vec = torch.zeros(bs, BERT_EMBED_DIM).to(self.device, siglip_vec.dtype)
-
-        return siglip_embedding, siglip_vec, bert_embedding, bert_vec
+        return siglip_embedding, siglip_vec
     
     @torch.no_grad
     def encode_bert(self, captions):
@@ -152,15 +154,12 @@ class ShapeBatchingDataset(IterableDataset):
         bert_vec = bert_outputs[:, 0, :] # (bs, 1024)
         bert_embedding = bert_outputs[:, 1:, :] # (bs, 64, 1024)
 
-        siglip_embedding = torch.zeros(bs, 1, SIGLIP_EMBED_DIM).to(self.device, bert_vec.dtype)
-        siglip_vec = torch.zeros(bs, SIGLIP_EMBED_DIM).to(self.device, bert_vec.dtype)
-
-        return siglip_embedding, siglip_vec, bert_embedding, bert_vec
+        return bert_embedding, bert_vec
     
 def get_dataset(bs, seed, device, dtype, num_workers=16):
-    ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", split="train", streaming=True)
-    # ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=num_workers, split="train")
-    # ds = ds.to_iterable_dataset(1000)
+    # ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", split="train", streaming=True)
+    ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=num_workers, split="train")
+    ds = ds.to_iterable_dataset(1000)
     siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device, dtype)
     siglip_tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
     # bert_model = ModernBertModel.from_pretrained(BERT_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/modernbert").to(device, DTYPE)

@@ -4,9 +4,10 @@ import random
 import torch
 from dataset.shapebatching_dataset import ShapeBatchingDataset, get_dataset
 from dataset.inet96 import ImageNet96Dataset
+from dataset.inet8bit import ImageNetDataset, InfiniteDataLoader
 from transformer.reimei import ReiMei, ReiMeiParameters
 from accelerate import Accelerator
-from config import BERT_EMBED_DIM, BERT_HF_NAME, BS, CFG_RATIO, MAX_CAPTION_LEN, TRAIN_STEPS, MASK_RATIO, AE_SCALING_FACTOR, AE_CHANNELS, AE_HF_NAME, MODELS_DIR_BASE, DS_DIR_BASE, SEED, SIGLIP_EMBED_DIM, SIGLIP_HF_NAME, USERNAME, DATASET_NAME, LR
+from config import AE_SHIFT_FACTOR, BERT_EMBED_DIM, BERT_HF_NAME, BS, CFG_RATIO, MAX_CAPTION_LEN, TRAIN_STEPS, MASK_RATIO, AE_SCALING_FACTOR, AE_CHANNELS, AE_HF_NAME, MODELS_DIR_BASE, DS_DIR_BASE, SEED, SIGLIP_EMBED_DIM, SIGLIP_HF_NAME, USERNAME, DATASET_NAME, LR
 from config import DIT_S as DIT
 from datasets import load_dataset
 from transformer.utils import expand_mask, random_cfg_mask, random_mask, apply_mask_to_tensor, remove_masked_tokens
@@ -40,7 +41,7 @@ def sample_images(model, vae, ds, noise, prompts, sig_emb, sig_vec, bert_emb, be
 
     # Use the stored embeddings
     sampled_latents = model.sample(noise, sig_emb, sig_vec, bert_emb, bert_vec, sample_steps=50, cfg=1.0).to(device, dtype=DTYPE)
-    cfg_sampled_latents = model.sample(noise, sig_emb, sig_vec, bert_emb, bert_vec, sample_steps=50, cfg=3.0).to(device, dtype=DTYPE)
+    cfg_sampled_latents = model.sample(noise, sig_emb, sig_vec, bert_emb, bert_vec, sample_steps=50, cfg=7.0).to(device, dtype=DTYPE)
     
     # Decode latents to images
     sampled_images = normalize_batch(vae.decode(sampled_latents).sample)
@@ -59,12 +60,12 @@ def sample_images(model, vae, ds, noise, prompts, sig_emb, sig_vec, bert_emb, be
 
 if __name__ == "__main__":
     # Comment this out if you havent downloaded dataset and models yet
-    # datasets.config.HF_HUB_OFFLINE = 1
+    datasets.config.HF_HUB_OFFLINE = 1
     # torch.set_float32_matmul_precision('high')
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    embed_dim = 768
-    patch_size = (1,1)
+    embed_dim = 384 * 2
+    patch_size = (2,2)
 
     params = ReiMeiParameters(
         use_mmdit=True,
@@ -72,16 +73,17 @@ if __name__ == "__main__":
         channels=AE_CHANNELS,
         patch_size=patch_size,
         embed_dim=embed_dim,
-        num_layers=4,
+        num_layers=6,
         num_heads=(embed_dim // 128),
         siglip_dim=SIGLIP_EMBED_DIM,
         bert_dim=BERT_EMBED_DIM,
-        num_experts=1,
+        num_experts=4,
         capacity_factor=1.0,
-        shared_experts=None,
+        shared_experts=1,
         dropout=0.1,
         token_mixer_layers=1,
-        image_text_expert_ratio=1,
+        image_text_expert_ratio=4,
+        use_moe=False,
     )
 
     accelerator = Accelerator()
@@ -110,9 +112,9 @@ if __name__ == "__main__":
     # ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=16, split="train").to_iterable_dataset(1000)
     # ds = ImageNetDataset(f"{DS_DIR_BASE}/imagenet.int8/inet.npy", f"{DS_DIR_BASE}/imagenet.int8/inet.json")
     # dataset = DataLoader(ds, batch_size=BS, shuffle=True, num_workers=1)
-    # dataset = InfiniteDataLoader(dataset)
+    # dataset = InfiniteDataLoader(ds, device, DTYPE)
 
-    # ds = load_dataset(f"{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=1, split="train").to_iterable_dataset(1000)
+    # ds = load_dataset(f"{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=1, split="train").to_iterable_dataset(50)
 
     # siglip_model = SiglipModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device, DTYPE)
     # siglip_processor = SiglipProcessor.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
@@ -195,9 +197,9 @@ if __name__ == "__main__":
 
         del grid, example_ground_truth, example_latents
 
-        ex_captions = ["a green field with green bushes", "bright blue sky with clouds", "a red apple on a wooden table", "a field of green grass with a snowcapped mountain in the background"]
-        # ex_captions = ["a cheeseburger on a white plate", "a bunch of bananas on a wooden table", "a white tea pot on a wooden table", "an erupting volcano with lava pouring out"]
-        ex_sig_emb, ex_sig_vec, _, _= ds.encode_siglip(ex_captions)
+        # ex_captions = ["a green field with green bushes", "bright blue sky with clouds", "a red apple on a wooden table", "a field of green grass with a snowcapped mountain in the background"]
+        ex_captions = ["a cheeseburger on a white plate", "a bunch of bananas on a wooden table", "a white tea pot on a wooden table", "an erupting volcano with lava pouring out"]
+        ex_sig_emb, ex_sig_vec = ds.encode_siglip(ex_captions)
 
         # ex_sig_emb = torch.zeros(4, 1, 1152).to(device, dtype=DTYPE)
         # ex_sig_vec = torch.zeros(4, 1152).to(device, dtype=DTYPE)
@@ -216,17 +218,17 @@ if __name__ == "__main__":
         latents = batch["ae_latent"].to(device, dtype=DTYPE)
 
         bs, c, h, w = latents.shape
-        latents = latents * AE_SCALING_FACTOR
+        latents = (latents + AE_SHIFT_FACTOR) * AE_SCALING_FACTOR
 
         siglip_emb = batch["siglip_emb"].to(device, dtype=DTYPE)
         siglip_vec = batch["siglip_vec"].to(device, dtype=DTYPE)
-        bert_emb = batch["bert_emb"].to(device, dtype=DTYPE)
-        bert_vec = batch["bert_vec"].to(device, dtype=DTYPE)
+        # bert_emb = batch["bert_emb"].to(device, dtype=DTYPE)
+        # bert_vec = batch["bert_vec"].to(device, dtype=DTYPE)
         
         # siglip_emb = torch.zeros(bs, 1, 1152).to(device, dtype=DTYPE)
         # siglip_vec = torch.zeros(bs, 1152).to(device, dtype=DTYPE)
-        # bert_emb = torch.zeros(bs, 1, 1024).to(device, dtype=DTYPE)
-        # bert_vec = torch.zeros(bs, 1024).to(device, dtype=DTYPE)
+        bert_emb = torch.zeros(bs, 1, 1024).to(device, dtype=DTYPE)
+        bert_vec = torch.zeros(bs, 1024).to(device, dtype=DTYPE)
 
         img_mask = random_mask(bs, latents.shape[-2], latents.shape[-1], patch_size, mask_ratio=MASK_RATIO).to(device, dtype=DTYPE)
         cfg_mask = random_cfg_mask(bs, 0.1).to(device, dtype=DTYPE)
@@ -254,17 +256,17 @@ if __name__ == "__main__":
         img_mask = expand_mask(img_mask, latents.shape[-2], latents.shape[-1], patch_size)
 
         # Reshape from (BS, C, H, W) to (BS, H*W, C)
-        vtheta = vtheta.permute(0, 2, 3, 1).reshape(bs, -1, AE_CHANNELS)
-        latents = latents.permute(0, 2, 3, 1).reshape(bs, -1, AE_CHANNELS)
-        z = z.permute(0, 2, 3, 1).reshape(bs, -1, AE_CHANNELS)
+        vtheta_h = vtheta.permute(0, 2, 3, 1).reshape(bs, -1, AE_CHANNELS)
+        latents_h = latents.permute(0, 2, 3, 1).reshape(bs, -1, AE_CHANNELS)
+        z_h = z.permute(0, 2, 3, 1).reshape(bs, -1, AE_CHANNELS)
 
-        vtheta = remove_masked_tokens(vtheta, img_mask)
-        latents = remove_masked_tokens(latents, img_mask)
-        z = remove_masked_tokens(z, img_mask)
+        vtheta_h = remove_masked_tokens(vtheta_h, img_mask)
+        latents_h = remove_masked_tokens(latents_h, img_mask)
+        z_h = remove_masked_tokens(z_h, img_mask)
 
-        v = z - latents
+        v = z_h - latents_h
 
-        mse = (((v - vtheta) ** 2)).mean()
+        mse = (((v - vtheta_h) ** 2)).mean()
         loss = mse
 
         optimizer.zero_grad()
@@ -277,24 +279,31 @@ if __name__ == "__main__":
         if accelerator.is_main_process:
             wandb.log({"loss": loss.item()}, step=batch_idx)
 
-        del mse, loss, vtheta, v, z, latents, x_t
+        del mse, loss, v, vtheta_h, latents_h, z_h
 
-        if batch_idx % 1000 == 0:
+        if batch_idx % 200 == 0:
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
-                model.eval()
-                ae = ae.to(device)
+                with torch.no_grad():
+                    model.eval()
+                    ae = ae.to(device)
 
-                grid = sample_images(model, ae, ds, noise, ex_captions, ex_sig_emb, ex_sig_vec, ex_bert_emb, ex_bert_vec)
-                torchvision.utils.save_image(grid, f"logs/sampled_images_step_{batch_idx}.png")
+                    grid = sample_images(model, ae, ds, noise, ex_captions, ex_sig_emb, ex_sig_vec, ex_bert_emb, ex_bert_vec)
+                    torchvision.utils.save_image(grid, f"logs/sampled_images_step_{batch_idx}.png")
 
-                # wandb.log({"Siglip scores": scores.mean().item(), "Siglip scores with CFG": cfg_scores.mean().item()}, step=batch_idx)
+                    # wandb.log({"Siglip scores": scores.mean().item(), "Siglip scores with CFG": cfg_scores.mean().item()}, step=batch_idx)
 
-                del grid
+                    del grid
 
-                ae = ae.to("cpu")
+                    # Log 4 batch images
+                    # latents = latents[:4] / AE_SCALING_FACTOR
+                    # batch_imgs = ae.decode(latents).sample
+                    # grid = torchvision.utils.make_grid(batch_imgs, nrow=2, normalize=True, scale_each=True)
+                    # torchvision.utils.save_image(grid, f"logs/batch_images_step_{batch_idx}.png")
 
-                model.train()
+                    ae = ae.to("cpu")
+
+                    model.train()
 
         if ((batch_idx % (TRAIN_STEPS//10)) == 0) and batch_idx != 0:
             accelerator.wait_for_everyone()

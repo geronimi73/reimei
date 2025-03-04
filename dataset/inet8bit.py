@@ -1,3 +1,10 @@
+import json
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+from transformers import SiglipTextModel, SiglipTokenizer
+from config import SIGLIP_HF_NAME, MODELS_DIR_BASE
+
 class ImageNetDataset(Dataset):
     def __init__(self, data_path, labels_path=None):
         self.data = np.memmap(data_path, dtype='uint8', mode='r', shape=(1281152, 4096))
@@ -15,9 +22,11 @@ class ImageNetDataset(Dataset):
         return image, label, label_text
     
 class InfiniteDataLoader:
-    def __init__(self, dataset):
+    def __init__(self, dataset, device, dtype):
         self.dataset = dataset
-        self.siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device, DTYPE)
+        self.device = device
+        self.dtype = dtype
+        self.siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device, dtype)
         self.siglip_tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
         self.device = "cuda"
 
@@ -30,8 +39,8 @@ class InfiniteDataLoader:
                     'ae_latent': images,
                     'siglip_emb': siglip_emb,
                     'siglip_vec': siglip_vec,
-                    'bert_emb': torch.zeros(len(images), 1, BERT_EMBED_DIM).to(device, dtype=DTYPE),
-                    'bert_vec': torch.zeros(len(images), BERT_EMBED_DIM).to(device, dtype=DTYPE),
+                    # 'bert_emb': torch.zeros(len(images), 1, BERT_EMBED_DIM).to(device, dtype=DTYPE),
+                    # 'bert_vec': torch.zeros(len(images), BERT_EMBED_DIM).to(device, dtype=DTYPE),
                 }
                 yield batch
 

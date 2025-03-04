@@ -7,6 +7,7 @@ from dataclasses import dataclass
 class BackboneParams:
     use_mmdit: bool = True
     use_ec: bool = False
+    use_moe: bool = False
     embed_dim: int = 1152
     num_layers: int = 24
     num_heads: int = 1152 // 64
@@ -46,15 +47,18 @@ class TransformerBackbone(nn.Module):
             scaled_num_heads = params.num_heads
             mlp_dim = max(params.embed_dim, scaled_mlp_dim)
 
-            if i % 2 == 0:  # Even layers use regular DiT (no MoE)
-                n_exp = 1
-                n_shared = 1
-                n_act = 1.0
-            else:  # Odd layers use MoE DiT
-                n_exp = params.num_experts
-                n_shared = params.shared_experts
-                n_act = min(params.capacity_factor, float(n_exp))
-            
+            # if i % 2 == 0:  # Even layers use regular DiT (no MoE)
+            #     n_exp = 1
+            #     n_shared = 1
+            #     n_act = 1.0
+            # else:  # Odd layers use MoE DiT
+            #     n_exp = params.num_experts
+            #     n_shared = params.shared_experts
+            #     n_act = min(params.capacity_factor, float(n_exp))
+            n_exp = params.num_experts
+            n_shared = params.shared_experts
+            n_act = min(params.capacity_factor, float(n_exp))
+
             if params.use_mmdit:
                 if i < params.num_layers // 2: # First half uses DoubleStreamBlock
                     self.double_layers.append(DoubleStreamBlock(
@@ -67,6 +71,7 @@ class TransformerBackbone(nn.Module):
                         num_shared_experts=n_shared,
                         dropout=params.dropout,
                         exp_ratio=params.image_text_expert_ratio,
+                        use_moe=params.use_moe,
                         use_expert_choice=params.use_ec,
                     ))
                 else:  # Second half uses SingleStreamBlock
@@ -74,7 +79,6 @@ class TransformerBackbone(nn.Module):
                         hidden_size=params.embed_dim,
                         num_heads=scaled_num_heads,
                         mlp_dim=mlp_dim,
-
                     ))
             else:
                 self.layers.append(DiTBlock(
@@ -86,6 +90,7 @@ class TransformerBackbone(nn.Module):
                     pretraining_tp=params.pretraining_tp,
                     num_shared_experts=n_shared,
                     attn_drop=params.dropout,
+                    use_moe=params.use_moe,
                     use_expert_choice=params.use_ec
                 ))
 

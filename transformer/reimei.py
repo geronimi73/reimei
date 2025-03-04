@@ -8,13 +8,14 @@ from .utils import remove_masked_tokens, add_masked_tokens, unpatchify
 from .backbone import BackboneParams, TransformerBackbone
 from .token_mixer import TokenMixer, TokenMixerParameters
 import torch
-from config import AE_SCALING_FACTOR
+from config import AE_SCALING_FACTOR, AE_SHIFT_FACTOR
 from dataclasses import dataclass
 
 @dataclass
 class ReiMeiParameters:
     use_mmdit: bool = True
     use_ec: bool = False
+    use_moe: bool = False
     channels: int = 32
     patch_size: tuple[int, int] = (1,1)
     embed_dim: int = 1152
@@ -94,6 +95,7 @@ class ReiMei(nn.Module):
             token_mixer_params = TokenMixerParameters(
                 use_mmdit=params.use_mmdit,
                 use_ec=params.use_ec,
+                use_moe=params.use_moe,
                 embed_dim=self.embed_dim,
                 num_heads=params.num_heads,
                 num_layers=params.token_mixer_layers,
@@ -110,6 +112,7 @@ class ReiMei(nn.Module):
         backbone_params = BackboneParams(
             use_mmdit=params.use_mmdit,
             use_ec=params.use_ec,
+            use_moe=params.use_moe,
             embed_dim=self.embed_dim,
             num_layers=params.num_layers,
             num_heads=params.num_heads,
@@ -263,4 +266,4 @@ class ReiMei(nn.Module):
 
         # print("Std dev and mean of sampled images", torch.std_mean(images[-1]))
 
-        return (images[-1] / AE_SCALING_FACTOR)
+        return (images[-1] / AE_SCALING_FACTOR) - AE_SHIFT_FACTOR
