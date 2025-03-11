@@ -47,20 +47,17 @@ class TransformerBackbone(nn.Module):
             scaled_num_heads = params.num_heads
             mlp_dim = max(params.embed_dim, scaled_mlp_dim)
 
-            # if i % 2 == 0:  # Even layers use regular DiT (no MoE)
-            #     n_exp = 1
-            #     n_shared = 1
-            #     n_act = 1.0
-            # else:  # Odd layers use MoE DiT
-            #     n_exp = params.num_experts
-            #     n_shared = params.shared_experts
-            #     n_act = min(params.capacity_factor, float(n_exp))
-            n_exp = params.num_experts
-            n_shared = params.shared_experts
-            n_act = min(params.capacity_factor, float(n_exp))
+            if i % 2 == 0:  # Even layers use regular DiT (no MoE)
+                n_exp = 1
+                n_shared = None
+                n_act = 1.0
+            else:  # Odd layers use MoE DiT
+                n_exp = params.num_experts
+                n_shared = params.shared_experts
+                n_act = min(params.capacity_factor, float(n_exp))
 
             if params.use_mmdit:
-                if i < params.num_layers // 2: # First half uses DoubleStreamBlock
+                if i < params.num_layers // 3: # First third uses DoubleStreamBlock
                     self.double_layers.append(DoubleStreamBlock(
                         hidden_size=params.embed_dim,
                         num_heads=scaled_num_heads,
@@ -74,11 +71,19 @@ class TransformerBackbone(nn.Module):
                         use_moe=params.use_moe,
                         use_expert_choice=params.use_ec,
                     ))
-                else:  # Second half uses SingleStreamBlock
+                else:  # Second two-thirds use SingleStreamBlock
                     self.single_layers.append(SingleStreamBlock(
                         hidden_size=params.embed_dim,
                         num_heads=scaled_num_heads,
                         mlp_dim=mlp_dim,
+                        num_experts=n_exp,
+                        capacity_factor=n_act,
+                        pretraining_tp=params.pretraining_tp,
+                        num_shared_experts=n_shared,
+                        dropout=params.dropout,
+                        use_moe=params.use_moe,
+                        use_expert_choice=params.use_ec
+
                     ))
             else:
                 self.layers.append(DiTBlock(

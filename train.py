@@ -8,7 +8,7 @@ from dataset.shapebatching_dataset import ShapeBatchingDataset, get_dataset
 from transformer.reimei import ReiMei, ReiMeiParameters
 from transformer.discriminator import Discriminator, DiscriminatorParameters, gan_loss_with_approximate_penalties
 from accelerate import Accelerator
-from config import AE_SHIFT_FACTOR, BS, CFG_RATIO, MAX_CAPTION_LEN, TRAIN_STEPS, MASK_RATIO, AE_SCALING_FACTOR, AE_CHANNELS, AE_HF_NAME, MODELS_DIR_BASE, DS_DIR_BASE, SEED, SIGLIP_EMBED_DIM, SIGLIP_HF_NAME, USERNAME, DATASET_NAME, LR
+from config import AE_SHIFT_FACTOR, BS, CFG_RATIO, MAX_CAPTION_LEN, TRAIN_STEPS, MASK_RATIO, AE_SCALING_FACTOR, AE_CHANNELS, AE_HF_NAME, MODELS_DIR_BASE, SEED, SIGLIP_EMBED_DIM, DATASET_NAME, LR
 from config import DIT_S as DIT
 from datasets import load_dataset
 from transformer.utils import expand_mask, random_cfg_mask, random_mask, apply_mask_to_tensor, remove_masked_tokens
@@ -22,7 +22,7 @@ import numpy as np
 from torch.utils.data import Dataset
 from diffusers import AutoencoderDC
 from diffusers import AutoencoderKL
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import OneCycleLR, ExponentialLR
 import wandb
 # from torchmetrics.functional.multimodal import clip_score
 from transformers import SiglipModel, SiglipProcessor
@@ -41,8 +41,8 @@ def sample_images(model, vae, ds, noise, prompts, sig_emb, sig_vec):
         return (images - min_vals) / scale
 
     # Use the stored embeddings
-    sampled_latents = model.sample(noise, sig_emb, sig_vec, sample_steps=1, cfg=3.0).to(device, dtype=DTYPE)
-    cfg_sampled_latents = model.sample(noise, sig_emb, sig_vec, sample_steps=50, cfg=3.0).to(device, dtype=DTYPE)
+    sampled_latents = model.sample(noise, sig_emb, sig_vec, sample_steps=50, cfg=1.0).to(device, dtype=DTYPE)
+    cfg_sampled_latents = model.sample(noise, sig_emb, sig_vec, sample_steps=50, cfg=6.0).to(device, dtype=DTYPE)
     
     # Decode latents to images
     sampled_images = normalize_batch(vae.decode(sampled_latents).sample)
@@ -61,12 +61,12 @@ def sample_images(model, vae, ds, noise, prompts, sig_emb, sig_vec):
 
 if __name__ == "__main__":
     # Comment this out if you havent downloaded dataset and models yet
-    datasets.config.HF_HUB_OFFLINE = 1
+    # datasets.config.HF_HUB_OFFLINE = 1
     # torch.set_float32_matmul_precision('high')
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
     embed_dim = 768
-    patch_size = (2,2)
+    patch_size = (1,1)
 
     params = ReiMeiParameters(
         use_mmdit=True,
@@ -74,11 +74,11 @@ if __name__ == "__main__":
         channels=AE_CHANNELS,
         patch_size=patch_size,
         embed_dim=embed_dim,
-        num_layers=6,
+        num_layers=4,
         num_heads=(embed_dim // 128),
         siglip_dim=SIGLIP_EMBED_DIM,
-        num_experts=4,
-        capacity_factor=1.0,
+        num_experts=8,
+        capacity_factor=2.0,
         shared_experts=1,
         dropout=0.1,
         token_mixer_layers=1,
@@ -95,49 +95,27 @@ if __name__ == "__main__":
     params_count = sum(p.numel() for p in model.parameters())
     print("Number of parameters: ", params_count)
 
-    discriminator_params = DiscriminatorParameters(
-        use_mmdit=True,
-        use_ec=True,
-        channels=AE_CHANNELS,
-        patch_size=patch_size,
-        embed_dim=embed_dim,
-        num_layers=4,
-        num_heads=(embed_dim // 128),
-        siglip_dim=SIGLIP_EMBED_DIM,
-        num_experts=4,
-        capacity_factor=1.0,
-        shared_experts=1,
-        dropout=0.1,
-        image_text_expert_ratio=4,
-        use_moe=False,
-    )
-
-    discriminator = Discriminator(discriminator_params)
-    params_count = sum(p.numel() for p in discriminator.parameters())
-    print("Number of discriminator parameters: ", params_count)
-
-    # wandb.init(project="ReiMei", config={
-    #     "params_count": params_count,
-    #     "dataset_name": DATASET_NAME,
-    #     "ae_hf_name": AE_HF_NAME,
-    #     "lr": LR,
-    #     "bs": BS,
-    #     "CFG_RATIO": CFG_RATIO,
-    #     "MASK_RATIO": MASK_RATIO,
-    #     "MAX_CAPTION_LEN": MAX_CAPTION_LEN,
-    #     "params": params,
-    #     "discriminator_params": discriminator_params,
-    # })
+    wandb.init(project="ReiMei", config={
+        "params_count": params_count,
+        "dataset_name": DATASET_NAME,
+        "ae_hf_name": AE_HF_NAME,
+        "lr": LR,
+        "bs": BS,
+        "CFG_RATIO": CFG_RATIO,
+        "MASK_RATIO": MASK_RATIO,
+        "MAX_CAPTION_LEN": MAX_CAPTION_LEN,
+        "params": params,
+    })
     
     ds = get_dataset(BS, SEED + accelerator.process_index, device=device, dtype=DTYPE, num_workers=1)
 
     optimizer = torch.optim.AdamW(model.parameters(), betas=(0.9, 0.95), lr=LR, weight_decay=0.01)
-    discriminator_optimizer = torch.optim.AdamW(discriminator.parameters(), betas=(0.9, 0.95), lr=LR, weight_decay=0.01)
 
     # scheduler = OneCycleLR(optimizer, max_lr=LR, total_steps=TRAIN_STEPS)
+    scheduler = ExponentialLR(optimizer, 0.9999995)
 
-    # model, optimizer, scheduler, train_dataloader = accelerator.prepare(model, optimizer, scheduler, dataset)
-    model, optimizer, discriminator, discriminator_optimizer, ds = accelerator.prepare(model, optimizer, discriminator, discriminator_optimizer, ds)
+    model, optimizer, scheduler, train_dataloader = accelerator.prepare(model, optimizer, scheduler, ds)
+    # model, optimizer, ds = accelerator.prepare(model, optimizer, ds)
 
     # checkpoint = torch.load(f"models/pretrained_reimei_model_and_optimizer.pt")
     # checkpoint = torch.load(f"models/reimei_model_and_optimizer_3_f32.pt")
@@ -156,7 +134,7 @@ if __name__ == "__main__":
         os.makedirs("logs", exist_ok=True)
         os.makedirs("models", exist_ok=True)
 
-        noise = torch.randn(4, AE_CHANNELS, 32, 32).to(device, dtype=DTYPE)
+        noise = torch.randn(4, AE_CHANNELS, 4, 4).to(device, dtype=DTYPE)
         example_batch = next(iter(ds))
 
         # example_latents = example_batch.to(device, dtype=DTYPE)[:4]
@@ -200,7 +178,7 @@ if __name__ == "__main__":
         siglip_emb = batch["siglip_emb"].to(device, dtype=DTYPE)
         siglip_vec = batch["siglip_vec"].to(device, dtype=DTYPE)
 
-        img_mask = random_mask(bs, latents.shape[-2], latents.shape[-1], patch_size, mask_ratio=MASK_RATIO).to(device, dtype=DTYPE)
+        img_mask = random_mask(bs, latents.shape[-2], latents.shape[-1], patch_size, mask_ratio=0.0).to(device, dtype=DTYPE)
         cfg_mask = random_cfg_mask(bs, 0.1).to(device, dtype=DTYPE)
 
         siglip_emb = siglip_emb.to(device, dtype=DTYPE) * cfg_mask.view(bs, 1, 1)
@@ -215,17 +193,7 @@ if __name__ == "__main__":
         z = torch.randn_like(latents, device=device, dtype=DTYPE)
         x_t = (1 - texp) * latents + texp * z
 
-        # Discriminator
-        d_loss, _ = gan_loss_with_approximate_penalties(discriminator, model, latents, x_t, t, siglip_emb, siglip_vec, img_mask, txt_mask, discriminator_turn=True)
-
-        discriminator_optimizer.zero_grad()
-        accelerator.backward(d_loss)
-        discriminator_optimizer.step()
-
-        # Generator
-        g_loss, vtheta = gan_loss_with_approximate_penalties(discriminator, model, latents, x_t, t, siglip_emb, siglip_vec, img_mask, txt_mask, discriminator_turn=False)
-
-        # vtheta = model(x_t, t, siglip_emb, siglip_vec, img_mask, txt_mask)
+        vtheta = model(x_t, t, siglip_emb, siglip_vec, img_mask, txt_mask)
 
         img_mask = expand_mask(img_mask, latents.shape[-2], latents.shape[-1], patch_size)
 
@@ -241,18 +209,17 @@ if __name__ == "__main__":
         v = z_h - latents_h
 
         mse = (((v - vtheta_h) ** 2)).mean()
-        # loss = ((mse * (1-texp)).mean() + (g_loss * texp).mean())
-        loss = mse + g_loss.mean()
+        loss = mse
 
         optimizer.zero_grad()
         accelerator.backward(loss)
         optimizer.step()
-        # scheduler.step()
+        scheduler.step()
 
         progress_bar.set_postfix(loss=loss.item())
         
-        # if accelerator.is_main_process:
-        #     wandb.log({"loss": loss.item()}, step=batch_idx)
+        if accelerator.is_main_process:
+            wandb.log({"loss": loss.item()}, step=batch_idx)
 
         del mse, loss, v, vtheta_h, latents_h, z_h
 

@@ -3,10 +3,11 @@ from torch.utils.data import IterableDataset
 from collections import defaultdict
 import numpy as np
 from torch.utils.data import DataLoader
-from config import DATASET_NAME, DS_DIR_BASE, MAX_CAPTION_LEN, MODELS_DIR_BASE, SIGLIP_EMBED_DIM, SIGLIP_HF_NAME, USERNAME
+from config import DATASET_NAME, DS_DIR_BASE, MAX_CAPTION_LEN, MODELS_DIR_BASE, SIGLIP_HF_NAME
 import random
 from transformers import SiglipTextModel, SiglipTokenizer
 from datasets import load_dataset
+import time
 
 # def custom_collate(batch):
 #     captions = [item['caption'] for item in batch]
@@ -38,9 +39,8 @@ from datasets import load_dataset
 
 def custom_collate(batch):
     captions = [item['caption'] for item in batch]
-    
-    ae_latents = [torch.tensor(item['vae_latent'], dtype=torch.uint8).view(torch.float8_e5m2) for item in batch]
-    ae_latent_shapes = [item.shape for item in ae_latents]
+    ae_latents = [item["ae_latent"] for item in batch]
+    ae_latent_shapes = [item["ae_latent_shape"] for item in batch]
 
     return {
         'caption': captions,
@@ -64,9 +64,9 @@ class ShapeBatchingDataset(IterableDataset):
 
     def __iter__(self):
         while True:
-            if self.shuffle:
-                self.dataset = self.dataset.shuffle(seed=self.seed, buffer_size=self.batch_size*self.buffer_multiplier)
-            self.dataloader = DataLoader(self.dataset, self.batch_size * 2, prefetch_factor=5, num_workers=self.num_workers, collate_fn=custom_collate)
+            # if self.shuffle:
+            #     self.dataset = self.dataset.shuffle(seed=self.seed, buffer_size=self.batch_size*self.buffer_multiplier)
+            self.dataloader = DataLoader(self.dataset, self.batch_size * 2, prefetch_factor=5, num_workers=self.num_workers, collate_fn=custom_collate, shuffle=self.shuffle)
             
             shape_batches = defaultdict(lambda: {'caption': [], 'ae_latent': []})
             for batch in self.dataloader:
@@ -92,7 +92,8 @@ class ShapeBatchingDataset(IterableDataset):
         # ae_latent = torch.tensor(np.stack([np.frombuffer(s, dtype=np.float32).copy() for s in samples["ae_latent"]])).reshape(-1, *latent_shape)
         # ae_latent = torch.tensor(np.stack([np.array(s, dtype=np.float16).copy() for s in samples['ae_latent']])).reshape(-1, *latent_shape)
         # ae_latent = torch.stack([s['ae_latent'].reshape(*ae_latent_shape) for s in samples])
-        ae_latent = torch.stack(samples["ae_latent"]).squeeze(1)
+        # ae_latent = torch.stack(samples["ae_latent"]).squeeze(1)
+        ae_latent = torch.tensor(samples["ae_latent"], dtype=torch.uint8).view(torch.float8_e5m2)
 
         siglip_embedding, siglip_vec = self.encode_siglip(samples["caption"])
 
@@ -120,8 +121,8 @@ class ShapeBatchingDataset(IterableDataset):
     
 def get_dataset(bs, seed, device, dtype, num_workers=16):
     # ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", split="train", streaming=True)
-    ds = load_dataset(f"{USERNAME}/{DATASET_NAME}", cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=num_workers, split="train")
-    ds = ds.to_iterable_dataset(1000)
+    ds = load_dataset(DATASET_NAME, cache_dir=f"{DS_DIR_BASE}/{DATASET_NAME}", num_proc=num_workers, split="train")
+    # ds = ds.to_iterable_dataset(1000)
     siglip_model = SiglipTextModel.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip").to(device, dtype)
     siglip_tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_HF_NAME, cache_dir=f"{MODELS_DIR_BASE}/siglip")
 

@@ -217,30 +217,47 @@ class DoubleStreamBlock(nn.Module):
         return img, txt
     
 class SingleStreamBlock(nn.Module):
-    """
-    A DiT "single-stream" block with:
-      - separate text/image QKV
-      - a single cross-attention pass over concatenated sequences
-      - Sparse MoE in place of the original MLP
-    """
     def __init__(
         self,
         hidden_size: int,
         num_heads: int,
         mlp_dim: int,
+        num_experts=8,
+        capacity_factor=2.0,
+        pretraining_tp=2,
+        num_shared_experts=2,
         dropout: float = 0.1,
+        use_moe: bool = False,
+        use_expert_choice: bool = False,
     ):
         super().__init__()
         self.hidden_dim = hidden_size
         self.num_heads = num_heads
         head_dim = hidden_size // num_heads
-        self.mlp_hidden_dim = mlp_dim
+
         self.dropout = dropout
 
         # qkv and mlp_in
-        self.linear1 = nn.Linear(hidden_size, hidden_size * 3 + self.mlp_hidden_dim)
+        self.linear1 = nn.Linear(hidden_size, hidden_size * 3)
+
+        if use_moe:
+            if use_expert_choice:
+                self.mlp = EC_SparseMoeBlock(
+                    hidden_size, mlp_dim, num_experts, float(capacity_factor), pretraining_tp, num_shared_experts
+                )
+            else:
+                self.mlp = TC_SparseMoeBlock(
+                    hidden_size, mlp_dim, num_experts, int(capacity_factor), pretraining_tp, num_shared_experts
+                )
+        else:
+            self.mlp = nn.Sequential(
+                nn.Linear(hidden_size, mlp_dim, bias=True),
+                nn.GELU(approximate="tanh"),
+                nn.Linear(mlp_dim, hidden_size, bias=True),
+            )
+
         # proj and mlp_out
-        self.linear2 = nn.Linear(hidden_size + self.mlp_hidden_dim, hidden_size)
+        self.linear2 = nn.Linear(2 * hidden_size, hidden_size)
 
         self.norm = QKNorm(head_dim)
 
@@ -258,10 +275,12 @@ class SingleStreamBlock(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         mod, _ = self.modulation(vec)
         x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
-        qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
+        qkv = self.linear1(x_mod)
+        mlp_out = self.mlp(x_mod)
+        # qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
 
         qkv = qkv.contiguous()
-        mlp = mlp.contiguous()
+        mlp_out = mlp_out.contiguous()
 
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
 
@@ -273,5 +292,5 @@ class SingleStreamBlock(nn.Module):
         # compute attention
         attn = attention(q, k, v, pe=pe, dropout=(self.dropout if self.training else 0.0))
         # compute activation in mlp stream, cat again and run second linear layer
-        output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
+        output = self.linear2(torch.cat((attn, self.mlp_act(mlp_out)), 2))
         return x + mod.gate * output

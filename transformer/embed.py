@@ -5,61 +5,6 @@ import math
 
 from transformer.math import rope
 
-def rope_1d(dim: int, seq_len: int, base: float = 10000.0) -> torch.Tensor:
-    """
-    Returns a [seq_len, dim] 1D rotary embedding (cos/sin interleaved).
-    
-    - We treat each pair of channels as (cos, sin).
-    - If dim=8, then we have dim//2=4 distinct frequencies, each used for 1 cos+sin pair.
-    """
-    assert dim % 2 == 0, f"rope_1d requires an even dim, got dim={dim}"
-    half_dim = dim // 2
-
-    # positions: shape [seq_len]
-    positions = torch.arange(seq_len, dtype=torch.float)
-
-    # freq for each pair
-    freq_seq = torch.arange(half_dim, dtype=torch.float) / float(half_dim)
-    freq_seq = base ** (-2.0 * freq_seq)  # shape [half_dim]
-
-    # Outer product => [seq_len, half_dim]
-    phase = positions[:, None] * freq_seq[None, :]  # [seq_len, half_dim]
-
-    # Cos, sin => shape [seq_len, half_dim] each
-    cos_ = torch.cos(phase)
-    sin_ = torch.sin(phase)
-
-    # Interleave cos,sin into final [seq_len, dim]
-    emb = torch.stack([cos_, sin_], dim=-1)  # [seq_len, half_dim, 2]
-    emb = emb.view(seq_len, dim)            # [seq_len, dim]
-    return emb
-
-def rope_2d(dim: int, height: int, width: int, base: float = 10000.0) -> torch.Tensor:
-    """
-    Returns a [height*width, dim] 2D rotary embedding.
-    - The first (dim/2) covers the row dimension, the second (dim/2) covers the col dimension.
-    - Each half is cos/sin interleaved as in rope_1d.
-    """
-    assert dim % 2 == 0, "rope_2d requires an even dim"
-    half = dim // 2
-
-    # 1) row part => [height, half]
-    # We can reuse rope_1d logic: rope_1d(half, height)
-    row_emb_1d = rope_1d(half, height, base=base)  # [height, half]
-    # 2) col part => [width, half]
-    col_emb_1d = rope_1d(half, width, base=base)   # [width, half]
-
-    # We want a [height, width, dim] => row_emb in first half, col_emb in second half
-    # row_emb_1d => shape [height, half] -> broadcast across width
-    # col_emb_1d => shape [width, half] -> broadcast across height
-    row_emb_2d = row_emb_1d.unsqueeze(1).expand(height, width, half)  # [H,W,half]
-    col_emb_2d = col_emb_1d.unsqueeze(0).expand(height, width, half)  # [H,W,half]
-
-    # combine => [H,W,dim]
-    emb_2d = torch.cat([row_emb_2d, col_emb_2d], dim=-1)  # [H,W, dim]
-    emb_2d = emb_2d.view(height*width, dim)               # flatten to [N, dim]
-    return emb_2d
-
 def sincos_2d(embed_dim, h, w):
     """
     :param embed_dim: dimension of the embedding
