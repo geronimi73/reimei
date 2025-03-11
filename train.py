@@ -12,7 +12,8 @@ from config import AE_SHIFT_FACTOR, BS, CFG_RATIO, MAX_CAPTION_LEN, TRAIN_STEPS,
 from config import DIT_S as DIT
 from datasets import load_dataset
 from transformer.utils import expand_mask, random_cfg_mask, random_mask, apply_mask_to_tensor, remove_masked_tokens
-from tqdm import tqdm
+# from tqdm import tqdm
+from accelerate.utils import tqdm
 import datasets
 import torchvision
 import os
@@ -233,6 +234,8 @@ if __name__ == "__main__":
 
                     grid = sample_images(model.module, ae, ds, noise, ex_captions, ex_sig_emb, ex_sig_vec)
                     torchvision.utils.save_image(grid, f"logs/sampled_images_step_{batch_idx}.png")
+
+                    wandb.log({"sample_images": wandb.Image(grid)})
 
                     # wandb.log({"Siglip scores": scores.mean().item(), "Siglip scores with CFG": cfg_scores.mean().item()}, step=batch_idx)
 
