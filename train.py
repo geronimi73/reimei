@@ -65,7 +65,7 @@ if __name__ == "__main__":
     # torch.set_float32_matmul_precision('high')
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    embed_dim = 768
+    embed_dim = 1024
     patch_size = (1,1)
 
     params = ReiMeiParameters(
@@ -74,7 +74,7 @@ if __name__ == "__main__":
         channels=AE_CHANNELS,
         patch_size=patch_size,
         embed_dim=embed_dim,
-        num_layers=4,
+        num_layers=8,
         num_heads=(embed_dim // 128),
         siglip_dim=SIGLIP_EMBED_DIM,
         num_experts=8,
