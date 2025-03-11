@@ -231,7 +231,7 @@ if __name__ == "__main__":
                     model.eval()
                     ae = ae.to(device)
 
-                    grid = sample_images(model, ae, ds, noise, ex_captions, ex_sig_emb, ex_sig_vec)
+                    grid = sample_images(model.module, ae, ds, noise, ex_captions, ex_sig_emb, ex_sig_vec)
                     torchvision.utils.save_image(grid, f"logs/sampled_images_step_{batch_idx}.png")
 
                     # wandb.log({"Siglip scores": scores.mean().item(), "Siglip scores with CFG": cfg_scores.mean().item()}, step=batch_idx)
