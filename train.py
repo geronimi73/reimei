@@ -95,17 +95,18 @@ if __name__ == "__main__":
     params_count = sum(p.numel() for p in model.parameters())
     print("Number of parameters: ", params_count)
 
-    wandb.init(project="ReiMei", config={
-        "params_count": params_count,
-        "dataset_name": DATASET_NAME,
-        "ae_hf_name": AE_HF_NAME,
-        "lr": LR,
-        "bs": BS,
-        "CFG_RATIO": CFG_RATIO,
-        "MASK_RATIO": MASK_RATIO,
-        "MAX_CAPTION_LEN": MAX_CAPTION_LEN,
-        "params": params,
-    })
+    if accelerator.is_main_process:
+        wandb.init(project="ReiMei", config={
+            "params_count": params_count,
+            "dataset_name": DATASET_NAME,
+            "ae_hf_name": AE_HF_NAME,
+            "lr": LR,
+            "bs": BS,
+            "CFG_RATIO": CFG_RATIO,
+            "MASK_RATIO": MASK_RATIO,
+            "MAX_CAPTION_LEN": MAX_CAPTION_LEN,
+            "params": params,
+        }).log_code(".", include_fn=lambda path: path.endswith(".py") or path.endswith(".ipynb") or path.endswith(".json"))
     
     ds = get_dataset(BS, SEED + accelerator.process_index, device=device, dtype=DTYPE, num_workers=1)
 
